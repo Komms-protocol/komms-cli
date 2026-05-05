@@ -112,8 +112,6 @@ pub enum IdCmd {
     },
     Server {
         #[arg(long)]
-        creator_address_hex: String,
-        #[arg(long)]
         creation_txid: String,
     },
     Channel {
@@ -764,13 +762,9 @@ pub async fn run() -> anyhow::Result<()> {
                     let mid = protocol::message_id(&t, event_index);
                     json!({ "message_id": faster_hex::hex_string(&mid) })
                 }
-                IdCmd::Server {
-                    creator_address_hex,
-                    creation_txid,
-                } => {
-                    let c = hexutil::parse_hex_bytes(&creator_address_hex)?;
+                IdCmd::Server { creation_txid } => {
                     let tx = hexutil::parse_hex32(&creation_txid)?;
-                    let sid = protocol::server_id(&c, &tx);
+                    let sid = protocol::server_id(&tx);
                     json!({ "server_id": faster_hex::hex_string(&sid) })
                 }
                 IdCmd::Channel {

@@ -39,9 +39,9 @@ fn sha256_domain(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// A4.1 `sid = SHA-256("KOMMS_SERVER_V0" || creator_address_bytes || creation_txid_bytes)`
-pub fn server_id(creator_address_bytes: &[u8], creation_txid: &[u8; 32]) -> [u8; 32] {
-    sha256_domain(b"KOMMS_SERVER_V0", &[creator_address_bytes, creation_txid.as_ref()])
+/// A4.1 Komms server id: canonical `sid` equals the `ServerCreate` transaction id (32-byte Kaspa tx id).
+pub fn server_id(creation_txid: &[u8; 32]) -> [u8; 32] {
+    *creation_txid
 }
 
 /// A4.2 `cid = SHA-256("KOMMS_CHANNEL_V0" || sid || creator_address_bytes || creation_txid_bytes)`
