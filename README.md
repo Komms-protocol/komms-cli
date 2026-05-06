@@ -280,7 +280,7 @@ Subcommands (kebab-case in CLI):
 - `message-delete` — `--sid`, `--cid`, `--mid`, `OptMeta`
 - `dm-message-post` — `--did`, optional refs / `--content-hash`, `OptMeta`
 - `reaction-add`, `reaction-remove` — `--sid`, `--cid`, `--mid`, optional `--ref-hex`, `OptMeta`
-- `member-join`, `member-leave` — `--sid`, optional `--ref-hex`, `OptMeta`
+- `member-join`, `member-leave` — `--sid`, optional `--member-address` (defaults to `--change-address` with `--submit`), optional `--ref-hex`, `OptMeta`
 - `role-assign`, `role-revoke` — `--sid`, optional `--cid`, optional `--ref-hex`, `OptMeta`
 - `moderation-action` — `--sid`, optional `--cid`, optional `--mid`, optional `--ref-hex`, `OptMeta`
 

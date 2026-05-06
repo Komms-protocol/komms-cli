@@ -44,6 +44,12 @@ pub fn server_id(creation_txid: &[u8; 32]) -> [u8; 32] {
     *creation_txid
 }
 
+/// Member identity for `MEMBER_JOIN` / `MEMBER_LEAVE` (map key `pid`).
+/// `SHA-256("KOMMS_PARTICIPANT_V0" || creator_address_bytes)` — same `version || payload` as indexer APIs.
+pub fn participant_id(creator_address_bytes: &[u8]) -> [u8; 32] {
+    sha256_domain(b"KOMMS_PARTICIPANT_V0", &[creator_address_bytes])
+}
+
 /// A4.2 `cid = SHA-256("KOMMS_CHANNEL_V0" || sid || creator_address_bytes || creation_txid_bytes)`
 pub fn channel_id(
     sid: &[u8; 32],

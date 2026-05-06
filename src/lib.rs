@@ -10,17 +10,17 @@ mod submit;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signature, VerifyingKey};
-#[cfg(feature = "submit")]
 use kaspa_addresses::Address;
+#[cfg(feature = "submit")]
 use kaspa_consensus_core::tx::TransactionId;
 use kaspa_rpc_core::RpcHash;
 use kaspa_wrpc_client::{KaspaRpcClient, Resolver, WrpcEncoding};
 use kaspa_wrpc_client::prelude::NetworkType;
 use output::{event_to_json, ref_json};
 use protocol::{
-    self, EventType, ParsedKommsEvent, encode_komms_payload, parse_cbor_map, parse_komms_payload,
-    ref_from_cid_str, ref_from_content_hash, signing_payload_cbor, strip_komms_envelope,
-    validate_event,
+    self, EventType, ParsedKommsEvent, encode_komms_payload, participant_id, parse_cbor_map,
+    parse_komms_payload, ref_from_cid_str, ref_from_content_hash, signing_payload_cbor,
+    strip_komms_envelope, validate_event,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -324,6 +324,9 @@ pub enum PostCmd {
     MemberJoin {
         #[arg(long)]
         sid: String,
+        /// Kaspa address of the joining account (`pid` = participant id hash). Defaults to `--change-address` with `--submit`.
+        #[arg(long)]
+        member_address: Option<String>,
         #[arg(long)]
         ref_hex: Option<String>,
         #[command(flatten)]
@@ -332,6 +335,9 @@ pub enum PostCmd {
     MemberLeave {
         #[arg(long)]
         sid: String,
+        /// Kaspa address of the leaving account (`pid`). Defaults to `--change-address` with `--submit`.
+        #[arg(long)]
+        member_address: Option<String>,
         #[arg(long)]
         ref_hex: Option<String>,
         #[command(flatten)]
@@ -470,6 +476,42 @@ fn meta_sig(m: &OptMeta) -> anyhow::Result<Option<[u8; 64]>> {
         None => Ok(None),
         Some(h) => Ok(Some(hexutil::parse_hex64_sig(h)?)),
     }
+}
+
+fn creator_address_body_from_addr(addr: &Address) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + addr.payload.len());
+    v.push(addr.version as u8);
+    v.extend_from_slice(addr.payload.as_slice());
+    v
+}
+
+/// `MEMBER_JOIN` / `MEMBER_LEAVE` require `pid` (indexer + protocol validation). Resolved from `--member-address` or `--change-address` with `--submit`.
+fn patch_member_join_leave_pid(
+    ev: &mut ParsedKommsEvent,
+    cmd: &PostCmd,
+    submit: bool,
+    change_address: &Option<String>,
+) -> anyhow::Result<()> {
+    let member_address_opt = match cmd {
+        PostCmd::MemberJoin { member_address, .. } => member_address.as_deref(),
+        PostCmd::MemberLeave { member_address, .. } => member_address.as_deref(),
+        _ => return Ok(()),
+    };
+    let addr_str = if let Some(s) = member_address_opt {
+        s
+    } else if submit {
+        change_address.as_deref().context(
+            "member-join/member-leave: use --member-address, or --submit with --change-address",
+        )?
+    } else {
+        anyhow::bail!(
+            "member-join/member-leave: provide --member-address (or use --submit with --change-address)"
+        );
+    };
+    let addr: Address = addr_str.try_into().context("member/change address")?;
+    let body = creator_address_body_from_addr(&addr);
+    ev.pid = Some(participant_id(&body));
+    Ok(())
 }
 
 fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
@@ -655,7 +697,12 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             n: meta.n,
             sig: meta_sig(meta)?,
         },
-        PostCmd::MemberJoin { sid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::MemberJoin {
+            sid,
+            ref_hex,
+            meta,
+            ..
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::MemberJoin,
             sid: Some(z(sid)?),
@@ -669,7 +716,12 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             n: meta.n,
             sig: meta_sig(meta)?,
         },
-        PostCmd::MemberLeave { sid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::MemberLeave {
+            sid,
+            ref_hex,
+            meta,
+            ..
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::MemberLeave,
             sid: Some(z(sid)?),
@@ -887,7 +939,8 @@ pub async fn run() -> anyhow::Result<()> {
             private_key_hex,
             priority_fee,
         } => {
-            let ev = build_post_ev(&cmd)?;
+            let mut ev = build_post_ev(&cmd)?;
+            patch_member_join_leave_pid(&mut ev, &cmd, submit, &change_address)?;
             encode_komms_payload(&ev).context("validate + encode event")?;
             if submit {
                 #[cfg(feature = "submit")]

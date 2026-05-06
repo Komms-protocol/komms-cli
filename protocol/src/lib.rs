@@ -3,8 +3,8 @@
 mod encode;
 
 pub use encode::{
-    channel_id, dm_thread_id, encode_cbor_map, encode_komms_payload, message_id, ref_from_cid_str,
-    ref_from_content_hash, server_id, signing_payload_cbor, RefBuildError,
+    channel_id, dm_thread_id, encode_cbor_map, encode_komms_payload, message_id, participant_id,
+    ref_from_cid_str, ref_from_content_hash, server_id, signing_payload_cbor, RefBuildError,
 };
 
 use ciborium::Value;
@@ -374,6 +374,7 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
         }
         MemberJoin | MemberLeave => {
             require(ev.sid.is_some(), "sid")?;
+            require(ev.pid.is_some(), "pid")?;
             forbid(ev.cid.is_some(), "cid")?;
             forbid(ev.did.is_some(), "did")?;
             if !ev.enc {
