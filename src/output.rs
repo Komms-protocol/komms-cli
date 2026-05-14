@@ -39,7 +39,7 @@ pub fn event_to_json(ev: &ParsedKommsEvent) -> Value {
     let ref_parsed = ev.ref_bytes.as_deref().map(ref_json);
     json!({
         "v": ev.v,
-        "t": ev.t as u8,
+        "t": ev.t.as_u8(),
         "event_type": format!("{:?}", ev.t),
         "sid": hex_opt(&ev.sid),
         "cid": hex_opt(&ev.cid),

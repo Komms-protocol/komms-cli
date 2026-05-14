@@ -1,7 +1,18 @@
-//! Canonical CBOR encoding (Appendix A) and identifier derivations (A4).
+//! Canonical CBOR encoder and identifier helpers.
+//!
+//! ## Identifier model (v1 §9)
+//!
+//! v1 fixes a semantic mismatch in the v0 spec: `sid`, `cid`, and `mid`
+//! are ALL **direct Kaspa transaction ids** — the 32-byte txid of the
+//! transaction that created the entity. The v0 spec text described
+//! SHA-256 derivations for these fields that the v0 binary never
+//! implemented; v1 codifies the binary behaviour as the canonical rule.
+//!
+//! `pid` (Participant ID) and `did` (DM Thread ID) keep their v0
+//! semantics because the v0 binary already implemented them correctly.
 
 use crate::{
-    ParsedKommsEvent, ValidationError, validate_event, validate_ref, KOMMS_PAYLOAD_PREFIX,
+    KOMMS_PAYLOAD_PREFIX, ParsedKommsEvent, ValidationError, validate_event, validate_ref,
 };
 use ciborium::Value;
 use sha2::{Digest, Sha256};
@@ -39,30 +50,35 @@ fn sha256_domain(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// A4.1 Komms server id: canonical `sid` equals the `ServerCreate` transaction id (32-byte Kaspa tx id).
+/// v1 §9.1 — Komms server id is the 32-byte txid of the
+/// `ServerCreate` transaction.
+#[inline]
 pub fn server_id(creation_txid: &[u8; 32]) -> [u8; 32] {
     *creation_txid
 }
 
-/// Member identity for `MEMBER_JOIN` / `MEMBER_LEAVE` (map key `pid`).
-/// `SHA-256("KOMMS_PARTICIPANT_V0" || creator_address_bytes)` — same `version || payload` as indexer APIs.
+/// v1 §9.2 — Channel id is the 32-byte txid of the `ChannelCreate`
+/// transaction.
+#[inline]
+pub fn channel_id(creation_txid: &[u8; 32]) -> [u8; 32] {
+    *creation_txid
+}
+
+/// v1 §9.3 — Message id is the 32-byte txid of the `MessagePost`
+/// (or other message-creating) transaction.
+#[inline]
+pub fn message_id(creation_txid: &[u8; 32]) -> [u8; 32] {
+    *creation_txid
+}
+
+/// v1 §9.4 — Participant ID for ACL identity:
+/// `SHA-256("KOMMS_PARTICIPANT_V0" || creator_address_bytes)`. v0-compat.
 pub fn participant_id(creator_address_bytes: &[u8]) -> [u8; 32] {
     sha256_domain(b"KOMMS_PARTICIPANT_V0", &[creator_address_bytes])
 }
 
-/// A4.2 `cid = SHA-256("KOMMS_CHANNEL_V0" || sid || creator_address_bytes || creation_txid_bytes)`
-pub fn channel_id(
-    sid: &[u8; 32],
-    creator_address_bytes: &[u8],
-    creation_txid: &[u8; 32],
-) -> [u8; 32] {
-    sha256_domain(
-        b"KOMMS_CHANNEL_V0",
-        &[sid.as_ref(), creator_address_bytes, creation_txid.as_ref()],
-    )
-}
-
-/// A4.3 `did = SHA-256("KOMMS_DM_V0" || min(addrA,addrB) || max(addrA,addrB))`
+/// v1 §9.5 — DM thread id:
+/// `SHA-256("KOMMS_DM_V0" || min(addrA,addrB) || max(addrA,addrB))`. v0-compat.
 pub fn dm_thread_id(addr_a: &[u8], addr_b: &[u8]) -> [u8; 32] {
     let (min_a, max_a) = match addr_a.cmp(addr_b) {
         Ordering::Greater => (addr_b, addr_a),
@@ -71,53 +87,88 @@ pub fn dm_thread_id(addr_a: &[u8], addr_b: &[u8]) -> [u8; 32] {
     sha256_domain(b"KOMMS_DM_V0", &[min_a, max_a])
 }
 
-/// A4.4 `mid = SHA-256("KOMMS_MSG_V0" || txid_bytes || event_index)` with `event_index` as big-endian u64.
-pub fn message_id(txid: &[u8; 32], event_index: u64) -> [u8; 32] {
-    let ix = event_index.to_be_bytes();
-    sha256_domain(b"KOMMS_MSG_V0", &[txid.as_ref(), ix.as_ref()])
-}
-
-/// Encode the event map as deterministic CBOR (keys in ascending order). Does not include the `KOMM` prefix.
+/// Encode the event map as canonical CBOR. Does NOT include the `KCOM`
+/// envelope prefix; use [`encode_komms_payload`] for the full wire
+/// representation.
+///
+/// Runs [`validate_event`] before encoding so it is impossible to emit
+/// a payload that this crate would later refuse to parse.
 pub fn encode_cbor_map(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError> {
     validate_event(ev)?;
     if let Some(ref r) = ev.ref_bytes {
         validate_ref(r)?;
     }
+
+    // Build (key, value) pairs in strict ascending key order. ciborium's
+    // `Value::Map` preserves insertion order on the wire, so this is
+    // sufficient as long as we never push out of order.
     let mut pairs: Vec<(Value, Value)> = Vec::new();
 
-    pairs.push((Value::Integer(0.into()), Value::Integer(ev.v.into())));
-    pairs.push((
-        Value::Integer(1.into()),
-        Value::Integer((ev.t as u8).into()),
-    ));
-
+    // v0 core
+    pairs.push((bk(0), Value::Integer(ev.v.into())));
+    pairs.push((bk(1), Value::Integer((ev.t.as_u8() as u64).into())));
     if let Some(sid) = ev.sid {
-        pairs.push((Value::Integer(2.into()), Value::Bytes(sid.to_vec())));
+        pairs.push((bk(2), Value::Bytes(sid.to_vec())));
     }
     if let Some(cid) = ev.cid {
-        pairs.push((Value::Integer(3.into()), Value::Bytes(cid.to_vec())));
+        pairs.push((bk(3), Value::Bytes(cid.to_vec())));
     }
     if let Some(did) = ev.did {
-        pairs.push((Value::Integer(4.into()), Value::Bytes(did.to_vec())));
+        pairs.push((bk(4), Value::Bytes(did.to_vec())));
     }
     if let Some(pid) = ev.pid {
-        pairs.push((Value::Integer(5.into()), Value::Bytes(pid.to_vec())));
+        pairs.push((bk(5), Value::Bytes(pid.to_vec())));
     }
     if let Some(mid) = ev.mid {
-        pairs.push((Value::Integer(6.into()), Value::Bytes(mid.to_vec())));
+        pairs.push((bk(6), Value::Bytes(mid.to_vec())));
     }
     if let Some(ref r) = ev.ref_bytes {
-        pairs.push((Value::Integer(7.into()), Value::Bytes(r.clone())));
+        pairs.push((bk(7), Value::Bytes(r.clone())));
     }
-    pairs.push((Value::Integer(8.into()), Value::Bool(ev.enc)));
+    pairs.push((bk(8), Value::Bool(ev.enc)));
     if let Some(ts) = ev.ts {
-        pairs.push((Value::Integer(9.into()), Value::Integer(ts.into())));
+        pairs.push((bk(9), Value::Integer(ts.into())));
     }
     if let Some(n) = ev.n {
-        pairs.push((Value::Integer(10.into()), Value::Integer(n.into())));
+        pairs.push((bk(10), Value::Integer(n.into())));
     }
     if let Some(sig) = ev.sig {
-        pairs.push((Value::Integer(11.into()), Value::Bytes(sig.to_vec())));
+        pairs.push((bk(11), Value::Bytes(sig.to_vec())));
+    }
+
+    // v1 core
+    if let Some(parent_mid) = ev.parent_mid {
+        pairs.push((bk(12), Value::Bytes(parent_mid.to_vec())));
+    }
+    if let Some(scheme) = ev.enc_scheme {
+        pairs.push((bk(13), Value::Integer(scheme.into())));
+    }
+    if let Some(kind) = ev.kind {
+        pairs.push((bk(14), Value::Integer(kind.into())));
+    }
+    if let Some(ref mime) = ev.mime {
+        pairs.push((bk(15), Value::Text(mime.clone())));
+    }
+    if let Some(rt) = ev.ref_type {
+        pairs.push((bk(16), Value::Integer(rt.into())));
+    }
+    if let Some(dpk) = ev.device_pk {
+        pairs.push((bk(17), Value::Bytes(dpk.to_vec())));
+    }
+    if let Some(ss) = ev.sig_scheme {
+        pairs.push((bk(18), Value::Integer(ss.into())));
+    }
+    if let Some(ref rk) = ev.reaction_key {
+        pairs.push((bk(19), Value::Bytes(rk.clone())));
+    }
+    if let Some(ref ph) = ev.payment_hint {
+        pairs.push((bk(20), Value::Bytes(ph.clone())));
+    }
+
+    // Extension / vendor (keys 24..=255). BTreeMap iteration is already
+    // in ascending key order so we can append directly.
+    for (key, val) in ev.extension_fields.iter() {
+        pairs.push((bk(*key), val.clone()));
     }
 
     let v = Value::Map(pairs);
@@ -126,17 +177,75 @@ pub fn encode_cbor_map(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError
     Ok(buf)
 }
 
-/// A6: CBOR map bytes covered by `sig` (deterministic map **without** key 11).
+#[inline]
+fn bk(key: u8) -> Value {
+    Value::Integer((key as u64).into())
+}
+
+/// v1 §11.2: the canonical CBOR bytes covered by `sig` (the full map
+/// minus key 11). Equal-to-byte against [`encode_cbor_map`] of a
+/// `sig = None` clone.
 pub fn signing_payload_cbor(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError> {
     let mut ev = ev.clone();
     ev.sig = None;
     encode_cbor_map(&ev)
 }
 
-/// `KOMM` prefix + canonical CBOR for a full transaction payload.
+/// `KCOM` prefix + canonical CBOR for a full transaction payload.
 pub fn encode_komms_payload(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError> {
     let cbor = encode_cbor_map(ev)?;
     let mut out = KOMMS_PAYLOAD_PREFIX.to_vec();
     out.extend_from_slice(&cbor);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EventType;
+
+    fn ref_cid() -> Vec<u8> {
+        ref_from_cid_str("bagaaaa").unwrap()
+    }
+
+    #[test]
+    fn encode_then_parse_v1_roundtrip() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            sid: Some([1u8; 32]),
+            cid: Some([2u8; 32]),
+            ref_bytes: Some(ref_cid()),
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(123),
+            n: Some(1),
+            ..Default::default()
+        };
+        let raw = encode_komms_payload(&ev).unwrap();
+        let parsed = crate::parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn signing_payload_excludes_sig() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            sid: Some([1u8; 32]),
+            cid: Some([2u8; 32]),
+            ref_bytes: Some(ref_cid()),
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(42),
+            n: Some(2),
+            sig: Some([9u8; 64]),
+            ..Default::default()
+        };
+        let signing = signing_payload_cbor(&ev).unwrap();
+        let mut without_sig = ev.clone();
+        without_sig.sig = None;
+        let direct = encode_cbor_map(&without_sig).unwrap();
+        assert_eq!(signing, direct);
+    }
 }

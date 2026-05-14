@@ -536,6 +536,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::ServerUpdate {
             sid,
@@ -556,6 +557,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::ChannelCreate { sid, cid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -570,6 +572,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::ChannelUpdate { sid, cid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -584,6 +587,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::MessagePost {
             sid,
@@ -608,6 +612,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::MessageEdit {
             sid,
@@ -632,6 +637,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::MessageDelete { sid, cid, mid, meta } => ParsedKommsEvent {
             v: 0,
@@ -646,6 +652,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::DmMessagePost {
             did,
@@ -668,6 +675,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::ReactionAdd { sid, cid, mid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -682,6 +690,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::ReactionRemove { sid, cid, mid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -696,6 +705,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::MemberJoin {
             sid,
@@ -715,6 +725,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::MemberLeave {
             sid,
@@ -734,6 +745,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::RoleAssign { sid, cid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -748,6 +760,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::RoleRevoke { sid, cid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -762,6 +775,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
         PostCmd::ModerationAction { sid, cid, mid, ref_hex, meta } => ParsedKommsEvent {
             v: 0,
@@ -776,6 +790,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
+            ..Default::default()
         },
     };
     Ok(ev)
@@ -809,9 +824,9 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Commands::Id { cmd, pretty } => {
             let j = match cmd {
-                IdCmd::Message { txid, event_index } => {
+                IdCmd::Message { txid, event_index: _ } => {
                     let t = hexutil::parse_hex32(&txid)?;
-                    let mid = protocol::message_id(&t, event_index);
+                    let mid = protocol::message_id(&t);
                     json!({ "message_id": faster_hex::hex_string(&mid) })
                 }
                 IdCmd::Server { creation_txid } => {
@@ -820,14 +835,12 @@ pub async fn run() -> anyhow::Result<()> {
                     json!({ "server_id": faster_hex::hex_string(&sid) })
                 }
                 IdCmd::Channel {
-                    sid_hex,
-                    creator_address_hex,
+                    sid_hex: _,
+                    creator_address_hex: _,
                     creation_txid,
                 } => {
-                    let sid = hexutil::parse_hex32(&sid_hex)?;
-                    let c = hexutil::parse_hex_bytes(&creator_address_hex)?;
                     let tx = hexutil::parse_hex32(&creation_txid)?;
-                    let cid = protocol::channel_id(&sid, &c, &tx);
+                    let cid = protocol::channel_id(&tx);
                     json!({ "channel_id": faster_hex::hex_string(&cid) })
                 }
                 IdCmd::Dm { addr_a_hex, addr_b_hex } => {
@@ -1028,6 +1041,7 @@ mod tests {
             ts: None,
             n: None,
             sig: None,
+            ..Default::default()
         };
         let raw = encode_komms_payload(&ev).unwrap();
         let j = decode_payload(&raw, true, false, false, None).unwrap();
