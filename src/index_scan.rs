@@ -68,16 +68,16 @@ fn decode_record(bytes: &[u8]) -> anyhow::Result<KommsEventRecord> {
 /// Load all rows from `komms_events_by_txid` (suitable for dev / filtered CLI output).
 pub fn load_komms_events(data_dir: &Path) -> anyhow::Result<Vec<([u8; 32], KommsEventRecord)>> {
     let ks = Config::new(data_dir).open_transactional()?;
-    let part = ks.open_partition(
-        "komms_events_by_txid",
-        PartitionCreateOptions::default(),
-    )?;
+    let part = ks.open_partition("komms_events_by_txid", PartitionCreateOptions::default())?;
     let rtx = ks.read_tx();
     let mut out = Vec::new();
     for item in rtx.iter(&part) {
         let (key, value) = item.context("fjall iter")?;
         if key.len() != 32 {
-            anyhow::bail!("komms_events_by_txid key must be 32 bytes, got {}", key.len());
+            anyhow::bail!(
+                "komms_events_by_txid key must be 32 bytes, got {}",
+                key.len()
+            );
         }
         let tx_id: [u8; 32] = key.as_ref().try_into().expect("length checked");
         let rec: KommsEventRecord = decode_record(value.as_ref())

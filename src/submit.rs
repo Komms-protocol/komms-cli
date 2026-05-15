@@ -6,20 +6,22 @@ use kaspa_addresses::Address;
 use kaspa_consensus_core::{
     config::params::Params,
     constants::TX_VERSION,
-    hashing::sighash::{calc_ecdsa_signature_hash, calc_schnorr_signature_hash, SigHashReusedValuesUnsync},
+    hashing::sighash::{
+        SigHashReusedValuesUnsync, calc_ecdsa_signature_hash, calc_schnorr_signature_hash,
+    },
     hashing::sighash_type::SIG_HASH_ALL,
     mass::MassCalculator,
     subnets::SUBNETWORK_ID_NATIVE,
     tx::{
-        MutableTransaction, Transaction, TransactionInput, TransactionOutput, TransactionOutpoint,
+        MutableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput,
         UtxoEntry,
     },
 };
 use kaspa_rpc_core::{RpcTransaction, RpcUtxosByAddressesEntry, api::rpc::RpcApi};
 use kaspa_txscript::{pay_to_address_script, script_class::ScriptClass};
 use kaspa_wrpc_client::KaspaRpcClient;
-use protocol::encode_komms_payload;
 use protocol::ParsedKommsEvent;
+use protocol::encode_komms_payload;
 use secp256k1::{Keypair, SecretKey};
 
 const FEE_RATE: u64 = 10;
@@ -59,14 +61,7 @@ pub async fn submit_komms_payload(
     let script = pay_to_address_script(change_address);
     let inputs: Vec<TransactionInput> = picked
         .iter()
-        .map(|e| {
-            TransactionInput::new(
-                TransactionOutpoint::from(e.outpoint),
-                vec![],
-                0,
-                1,
-            )
-        })
+        .map(|e| TransactionInput::new(TransactionOutpoint::from(e.outpoint), vec![], 0, 1))
         .collect();
 
     let outputs = vec![TransactionOutput::new(output_value, script)];
@@ -100,18 +95,30 @@ pub async fn submit_komms_payload(
         let class = ScriptClass::from_script(&entry.script_public_key);
         let signature_script = match class {
             ScriptClass::PubKey => {
-                let sig_hash =
-                    calc_schnorr_signature_hash(&signable.as_verifiable(), i, SIG_HASH_ALL, &reused);
-                let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
+                let sig_hash = calc_schnorr_signature_hash(
+                    &signable.as_verifiable(),
+                    i,
+                    SIG_HASH_ALL,
+                    &reused,
+                );
+                let msg =
+                    secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
                 let sig: [u8; 64] = *keypair.sign_schnorr(msg).as_ref();
-                std::iter::once(65u8).chain(sig).chain([sighash_byte]).collect()
+                std::iter::once(65u8)
+                    .chain(sig)
+                    .chain([sighash_byte])
+                    .collect()
             }
             ScriptClass::PubKeyECDSA => {
                 let sig_hash =
                     calc_ecdsa_signature_hash(&signable.as_verifiable(), i, SIG_HASH_ALL, &reused);
-                let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
+                let msg =
+                    secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
                 let sig = secret_key.sign_ecdsa(msg).serialize_compact();
-                std::iter::once(65u8).chain(sig).chain([sighash_byte]).collect()
+                std::iter::once(65u8)
+                    .chain(sig)
+                    .chain([sighash_byte])
+                    .collect()
             }
             ScriptClass::ScriptHash | ScriptClass::NonStandard => {
                 anyhow::bail!(

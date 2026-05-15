@@ -11,15 +11,17 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signature, VerifyingKey};
 use kaspa_addresses::Address;
-#[cfg(feature = "submit")]
+// `TransactionId` is needed both for `read tx` (always available) and
+// for the gated submit paths. Importing unconditionally lets the
+// default no-feature build succeed.
 use kaspa_consensus_core::tx::TransactionId;
 use kaspa_rpc_core::RpcHash;
-use kaspa_wrpc_client::{KaspaRpcClient, Resolver, WrpcEncoding};
 use kaspa_wrpc_client::prelude::NetworkType;
+use kaspa_wrpc_client::{KaspaRpcClient, Resolver, WrpcEncoding};
 use output::{event_to_json, ref_json};
 use protocol::{
-    self, EventType, ParsedKommsEvent, encode_komms_payload, participant_id, parse_cbor_map,
-    parse_komms_payload, ref_from_cid_str, ref_from_content_hash, signing_payload_cbor,
+    self, EventType, ParsedKommsEvent, encode_komms_payload, parse_cbor_map, parse_komms_payload,
+    participant_id, ref_from_cid_str, ref_from_content_hash, signing_payload_cbor,
     strip_komms_envelope, validate_event,
 };
 use serde_json::json;
@@ -127,6 +129,16 @@ pub enum IdCmd {
         addr_a_hex: String,
         #[arg(long)]
         addr_b_hex: String,
+    },
+    /// Derive the canonical KOMMS `creator_address_bytes` (hex) and
+    /// `participant_id` (hex) from a Kaspa bech32 address. Matches
+    /// the encoding used by the indexer for `creator_address_hex`
+    /// parameters (e.g. `/komms/bootstrap`) and by the protocol's
+    /// `participant_id()` for ACL identity.
+    CreatorBytes {
+        /// Kaspa address, e.g. `kaspa:qpz…` / `kaspatest:qpz…`.
+        #[arg(long)]
+        address: String,
     },
 }
 
@@ -447,7 +459,8 @@ fn make_client(url: Option<&str>, network: NetworkType) -> anyhow::Result<KaspaR
         Some(Resolver::default())
     };
     let nid = read_rpc::network_id_for_cli(network);
-    KaspaRpcClient::new(encoding, url, resolver, Some(nid), None).map_err(|e| anyhow::anyhow!("{e}"))
+    KaspaRpcClient::new(encoding, url, resolver, Some(nid), None)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn ref_from_opts(
@@ -559,7 +572,12 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::ChannelCreate { sid, cid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::ChannelCreate {
+            sid,
+            cid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::ChannelCreate,
             sid: Some(z(sid)?),
@@ -567,14 +585,22 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: None,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::ChannelUpdate { sid, cid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::ChannelUpdate {
+            sid,
+            cid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::ChannelUpdate,
             sid: Some(z(sid)?),
@@ -582,7 +608,10 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: None,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
@@ -639,7 +668,12 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::MessageDelete { sid, cid, mid, meta } => ParsedKommsEvent {
+        PostCmd::MessageDelete {
+            sid,
+            cid,
+            mid,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::MessageDelete,
             sid: Some(z(sid)?),
@@ -669,7 +703,8 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             pid: None,
             mid: None,
             ref_bytes: Some(
-                ref_from_opts(ref_hex, ref_cid, content_hash)?.context("dm-message-post needs ref")?,
+                ref_from_opts(ref_hex, ref_cid, content_hash)?
+                    .context("dm-message-post needs ref")?,
             ),
             enc: true,
             ts: meta.ts,
@@ -677,7 +712,13 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::ReactionAdd { sid, cid, mid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::ReactionAdd {
+            sid,
+            cid,
+            mid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::ReactionAdd,
             sid: Some(z(sid)?),
@@ -685,14 +726,23 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: Some(z(mid)?),
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::ReactionRemove { sid, cid, mid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::ReactionRemove {
+            sid,
+            cid,
+            mid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::ReactionRemove,
             sid: Some(z(sid)?),
@@ -700,7 +750,10 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: Some(z(mid)?),
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
@@ -708,10 +761,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ..Default::default()
         },
         PostCmd::MemberJoin {
-            sid,
-            ref_hex,
-            meta,
-            ..
+            sid, ref_hex, meta, ..
         } => ParsedKommsEvent {
             v: 0,
             t: EventType::MemberJoin,
@@ -720,7 +770,10 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: None,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
@@ -728,10 +781,7 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             ..Default::default()
         },
         PostCmd::MemberLeave {
-            sid,
-            ref_hex,
-            meta,
-            ..
+            sid, ref_hex, meta, ..
         } => ParsedKommsEvent {
             v: 0,
             t: EventType::MemberLeave,
@@ -740,14 +790,22 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: None,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::RoleAssign { sid, cid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::RoleAssign {
+            sid,
+            cid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::RoleAssign,
             sid: Some(z(sid)?),
@@ -755,14 +813,22 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: None,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::RoleRevoke { sid, cid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::RoleRevoke {
+            sid,
+            cid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::RoleRevoke,
             sid: Some(z(sid)?),
@@ -770,14 +836,23 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: None,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
             sig: meta_sig(meta)?,
             ..Default::default()
         },
-        PostCmd::ModerationAction { sid, cid, mid, ref_hex, meta } => ParsedKommsEvent {
+        PostCmd::ModerationAction {
+            sid,
+            cid,
+            mid,
+            ref_hex,
+            meta,
+        } => ParsedKommsEvent {
             v: 0,
             t: EventType::ModerationAction,
             sid: Some(z(sid)?),
@@ -785,7 +860,10 @@ fn build_post_ev(cmd: &PostCmd) -> anyhow::Result<ParsedKommsEvent> {
             did: None,
             pid: None,
             mid: mid.as_ref().map(|m| z(m)).transpose()?,
-            ref_bytes: ref_hex.as_ref().map(|h| hexutil::parse_hex_bytes(h)).transpose()?,
+            ref_bytes: ref_hex
+                .as_ref()
+                .map(|h| hexutil::parse_hex_bytes(h))
+                .transpose()?,
             enc: false,
             ts: meta.ts,
             n: meta.n,
@@ -824,7 +902,10 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Commands::Id { cmd, pretty } => {
             let j = match cmd {
-                IdCmd::Message { txid, event_index: _ } => {
+                IdCmd::Message {
+                    txid,
+                    event_index: _,
+                } => {
                     let t = hexutil::parse_hex32(&txid)?;
                     let mid = protocol::message_id(&t);
                     json!({ "message_id": faster_hex::hex_string(&mid) })
@@ -843,11 +924,28 @@ pub async fn run() -> anyhow::Result<()> {
                     let cid = protocol::channel_id(&tx);
                     json!({ "channel_id": faster_hex::hex_string(&cid) })
                 }
-                IdCmd::Dm { addr_a_hex, addr_b_hex } => {
+                IdCmd::Dm {
+                    addr_a_hex,
+                    addr_b_hex,
+                } => {
                     let a = hexutil::parse_hex_bytes(&addr_a_hex)?;
                     let b = hexutil::parse_hex_bytes(&addr_b_hex)?;
                     let did = protocol::dm_thread_id(&a, &b);
                     json!({ "dm_thread_id": faster_hex::hex_string(&did) })
+                }
+                IdCmd::CreatorBytes { address } => {
+                    let addr: Address = address
+                        .as_str()
+                        .try_into()
+                        .with_context(|| format!("could not parse kaspa address: {address}"))?;
+                    let body = creator_address_body_from_addr(&addr);
+                    let pid = protocol::participant_id(&body);
+                    json!({
+                        "kaspa_address": address,
+                        "address_version": addr.version as u8,
+                        "creator_address_hex": faster_hex::hex_string(&body),
+                        "participant_id_hex": faster_hex::hex_string(&pid),
+                    })
                 }
             };
             print_json(&j, pretty)?;
@@ -964,18 +1062,14 @@ pub async fn run() -> anyhow::Result<()> {
                         .context("--change-address required for --submit")?
                         .try_into()
                         .context("change address")?;
-                    let pk = private_key_hex.as_deref().context("--private-key-hex required")?;
+                    let pk = private_key_hex
+                        .as_deref()
+                        .context("--private-key-hex required")?;
                     let client = make_client(rpc_url.as_deref(), nt)?;
                     read_rpc::connect_rpc(&client).await?;
-                    let tid = submit::submit_komms_payload(
-                        &client,
-                        &ev,
-                        &addr,
-                        pk,
-                        priority_fee,
-                        nt,
-                    )
-                    .await?;
+                    let tid =
+                        submit::submit_komms_payload(&client, &ev, &addr, pk, priority_fee, nt)
+                            .await?;
                     let j = json!({ "submitted_transaction_id": tid.to_string(), "payload_hex": faster_hex::hex_string(&encode_komms_payload(&ev)?) });
                     print_json(&j, pretty)?;
                 }

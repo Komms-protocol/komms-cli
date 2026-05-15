@@ -311,12 +311,21 @@ pub enum KommsPayloadError {
     UnsupportedVersion(u64),
 }
 
-/// Two-layer parser output for callers that need to safely persist
-/// future-version events without dropping them.
+/// Three-way parser output for callers that need to safely persist
+/// future-version or reserved-event-type events without dropping them.
 #[derive(Debug)]
 pub enum ParsedPayload {
-    /// Fully parsed v0 or v1 event.
+    /// Fully parsed v0 or v1 event. Passed [`validate_event`].
     Known(ParsedKommsEvent),
+    /// Reserved or vendor event type (`event.t == EventType::Reserved(_)`).
+    /// Envelope, version, and any v0/v1 core fields the wire happened to
+    /// carry are parsed; structural validation is skipped because the
+    /// type's semantics are unknown to this build. Persist the raw bytes
+    /// so a future build can re-parse.
+    Opaque {
+        event: ParsedKommsEvent,
+        raw_cbor: Vec<u8>,
+    },
     /// `v > MAX_KNOWN_VERSION`. Raw CBOR bytes (post-prefix-strip) are
     /// included so the caller can re-parse after upgrading.
     Future { v: u64, raw_cbor: Vec<u8> },
@@ -746,9 +755,10 @@ pub fn parse_komms_payload(raw: &[u8]) -> Result<ParsedKommsEvent, KommsPayloadE
 }
 
 /// Same as [`parse_komms_payload`] but returns a [`ParsedPayload`] enum
-/// so the caller can persist future-version events as raw CBOR instead
-/// of treating them as a hard error. Use this in the indexer ingest
-/// path; use [`parse_komms_payload`] everywhere else.
+/// so the caller can persist future-version and reserved-event-type
+/// events as raw CBOR instead of treating them as hard errors. Use
+/// this in the indexer ingest path; use [`parse_komms_payload`]
+/// everywhere else.
 pub fn parse_komms_payload_with_future(raw: &[u8]) -> Result<ParsedPayload, KommsPayloadError> {
     let cbor = strip_komms_envelope(raw).ok_or(KommsPayloadError::MissingPrefix)?;
     canonical::validate_canonical(cbor)?;
@@ -759,8 +769,14 @@ pub fn parse_komms_payload_with_future(raw: &[u8]) -> Result<ParsedPayload, Komm
             raw_cbor: cbor.to_vec(),
         });
     }
-    validate_event(&ev)?;
-    Ok(ParsedPayload::Known(ev))
+    match validate_event(&ev) {
+        Ok(()) => Ok(ParsedPayload::Known(ev)),
+        Err(ValidationError::OpaqueEventType(_)) => Ok(ParsedPayload::Opaque {
+            event: ev,
+            raw_cbor: cbor.to_vec(),
+        }),
+        Err(other) => Err(other.into()),
+    }
 }
 
 #[cfg(test)]
@@ -1014,10 +1030,36 @@ mod tests {
                 assert_eq!(v, 2);
                 assert_eq!(raw_cbor, cbor);
             }
-            ParsedPayload::Known(_) => panic!("expected Future"),
+            other => panic!("expected Future, got {other:?}"),
         }
         // The strict variant errors out:
         let err = parse_komms_payload(&raw).unwrap_err();
         assert!(matches!(err, KommsPayloadError::UnsupportedVersion(2)));
+    }
+
+    #[test]
+    fn opaque_event_type_returns_opaque_variant() {
+        // t=64 (KMETA reserved range) — well-formed, semantically unknown.
+        // Canonical CBOR uses 1-byte uint for keys <=23 and 2-byte uint
+        // (`0x18 0x40`) for value 64.
+        let cbor = encode_map(vec![
+            (Value::Integer(0.into()), Value::Integer(0.into())),
+            (Value::Integer(1.into()), Value::Integer(64.into())),
+            (Value::Integer(8.into()), Value::Bool(false)),
+        ]);
+        let raw = v0_envelope(cbor.clone());
+        match parse_komms_payload_with_future(&raw).unwrap() {
+            ParsedPayload::Opaque { event, raw_cbor } => {
+                assert_eq!(event.t, EventType::Reserved(64));
+                assert_eq!(raw_cbor, cbor);
+            }
+            other => panic!("expected Opaque, got {other:?}"),
+        }
+        // The strict variant errors out:
+        let err = parse_komms_payload(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            KommsPayloadError::Validation(ValidationError::OpaqueEventType(_))
+        ));
     }
 }

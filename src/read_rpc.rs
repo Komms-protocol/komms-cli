@@ -12,9 +12,7 @@ use kaspa_wrpc_client::KaspaRpcClient;
 use kaspa_wrpc_client::client::ConnectOptions;
 use kaspa_wrpc_client::prelude::NetworkId;
 
-pub async fn connect_rpc(
-    client: &KaspaRpcClient,
-) -> anyhow::Result<()> {
+pub async fn connect_rpc(client: &KaspaRpcClient) -> anyhow::Result<()> {
     client
         .connect(Some(ConnectOptions::default()))
         .await
