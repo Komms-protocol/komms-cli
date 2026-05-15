@@ -10,7 +10,7 @@ mod submit;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signature, VerifyingKey};
-use kaspa_addresses::Address;
+use kaspa_addresses::{Address, Prefix, Version};
 // `TransactionId` is needed both for `read tx` (always available) and
 // for the gated submit paths. Importing unconditionally lets the
 // default no-feature build succeed.
@@ -139,6 +139,15 @@ pub enum IdCmd {
         /// Kaspa address, e.g. `kaspa:qpz…` / `kaspatest:qpz…`.
         #[arg(long)]
         address: String,
+    },
+    /// Generate a fresh secp256k1 keypair and its Kaspa
+    /// `Version::PubKey` (Schnorr P2PK) address for the given
+    /// network. The private key is printed to stdout — only use
+    /// this for testnet / smoke-test wallets, never mainnet
+    /// custody. Combine with `--pretty` for human-readable output.
+    NewWallet {
+        #[arg(long, default_value = "testnet")]
+        network: NetworkArg,
     },
 }
 
@@ -942,6 +951,37 @@ pub async fn run() -> anyhow::Result<()> {
                     let pid = protocol::participant_id(&body);
                     json!({
                         "kaspa_address": address,
+                        "address_version": addr.version as u8,
+                        "creator_address_hex": faster_hex::hex_string(&body),
+                        "participant_id_hex": faster_hex::hex_string(&pid),
+                    })
+                }
+                IdCmd::NewWallet { network } => {
+                    // Use the OS RNG via secp256k1's `rand` feature so
+                    // the resulting key has full 256-bit entropy. The
+                    // address is the bech32m of `[Version::PubKey || xonly]`
+                    // — same encoding `derive_admin_pubkey` produces, so
+                    // smoke-test wallets are indistinguishable from any
+                    // miner/user wallet on the wire.
+                    let (secret_key, _) =
+                        secp256k1::SECP256K1.generate_keypair(&mut secp256k1::rand::thread_rng());
+                    let kp = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret_key);
+                    let (xonly, _parity) = kp.x_only_public_key();
+                    let xonly_bytes = xonly.serialize();
+                    let prefix = match network {
+                        NetworkArg::Mainnet => Prefix::Mainnet,
+                        NetworkArg::Testnet => Prefix::Testnet,
+                        NetworkArg::Devnet => Prefix::Devnet,
+                        NetworkArg::Simnet => Prefix::Simnet,
+                    };
+                    let addr = Address::new(prefix, Version::PubKey, &xonly_bytes);
+                    let priv_hex = faster_hex::hex_string(&secret_key.secret_bytes());
+                    let body = creator_address_body_from_addr(&addr);
+                    let pid = protocol::participant_id(&body);
+                    json!({
+                        "private_key_hex": priv_hex,
+                        "xonly_pubkey_hex": faster_hex::hex_string(&xonly_bytes),
+                        "kaspa_address": addr.to_string(),
                         "address_version": addr.version as u8,
                         "creator_address_hex": faster_hex::hex_string(&body),
                         "participant_id_hex": faster_hex::hex_string(&pid),

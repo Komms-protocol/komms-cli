@@ -363,7 +363,10 @@ mod tests {
 
     #[test]
     fn tag_rejected() {
-        let bytes = enc(ciborium::Value::Tag(0, Box::new(ciborium::Value::Integer(1.into()))));
+        let bytes = enc(ciborium::Value::Tag(
+            0,
+            Box::new(ciborium::Value::Integer(1.into())),
+        ));
         assert!(matches!(
             validate_canonical(&bytes),
             Err(CanonicalError::TaggedItem { .. })

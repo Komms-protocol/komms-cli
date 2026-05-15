@@ -950,7 +950,10 @@ mod tests {
         let err = encode::encode_komms_payload(&ev).unwrap_err();
         assert!(matches!(
             err,
-            ValidationError::EncSchemeMismatch { scheme: 1, enc: false }
+            ValidationError::EncSchemeMismatch {
+                scheme: 1,
+                enc: false
+            }
         ));
     }
 
