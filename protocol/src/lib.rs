@@ -1,22 +1,34 @@
 //! KOMMS transaction-payload codec.
 //!
 //! This crate is the single source of truth for the KOMMS on-chain
-//! payload format. It implements both the historical v0 wire format and
-//! the v1 spec (`planning-docs/komms_protocol_v_1.md`). v1 indexers
-//! accept v0 events verbatim and treat reserved / vendor event types as
-//! opaque so the protocol can grow additively.
+//! payload format. It implements the historical v0 wire format, the v1
+//! spec (`planning-docs/komms_protocol_v_1.md`), and the v1.1 additive
+//! layer (`planning-docs/komms_protocol_v_1_1.md`). v1.1 indexers accept
+//! v0 and v1.0 events verbatim and treat reserved / vendor event types
+//! as opaque so the protocol can grow additively.
 //!
 //! ## Public API surface
 //!
 //! - [`parse_komms_payload`] — primary wire-entry parser. Enforces the
 //!   `KCOM` prefix, canonical CBOR (`canonical::validate_canonical`), and
-//!   v0/v1 validation rules. Use this on every byte stream that arrives
-//!   from chain.
+//!   v0/v1/v1.1 validation rules. Use this on every byte stream that
+//!   arrives from chain.
 //! - [`parse_cbor_map`] — low-level CBOR-only parser. Does NOT enforce
 //!   canonicality and is intended for unit tests and round-trip helpers.
-//! - [`validate_event`] — pure validation (A7/A8 of v0, §10 of v1).
+//! - [`validate_event`] — pure validation (A7/A8 of v0, §10 of v1, §12
+//!   of v1.1).
 //! - [`validate_ref`] — `ref_bytes` field layout check.
 //! - [`encode::*`] — canonical CBOR encoder + identifier helpers.
+//!
+//! ## v1.1 additions (Toccata-era)
+//!
+//! v1.1 is a strict superset of v1.0 sharing the same `v = 1` envelope.
+//! New CBOR keys 21–30 carry sealed-membership and encrypted-identifier
+//! fields per `planning-docs/komms_protocol_v_1_1.md` §1.1; new event
+//! types 23–26 (sealed member join/leave, key rotate, sealed event)
+//! mirror the v1.0 public-server analogs but never reveal `sid`, `cid`,
+//! or `pid` on chain. See [`EventType`] and [`ParsedKommsEvent`] field
+//! comments for per-key semantics.
 
 pub mod canonical;
 pub mod encode;
@@ -42,18 +54,28 @@ pub const MAX_KNOWN_VERSION: u64 = 1;
 
 /// Highest map key this crate parses at the v1 core level. Keys in
 /// [`EXTENSION_KEY_MIN`]..=255 are preserved opaquely as
-/// `extension_fields`.
-pub const V1_CORE_KEY_MAX: u8 = 23;
-pub const EXTENSION_KEY_MIN: u8 = 24;
+/// `extension_fields`. Bumped in v1.1 from 23 → 30 to cover the sealed
+/// membership and encrypted-identifier allocations (`komms_protocol_v_1_1.md`
+/// §1.1).
+pub const V1_CORE_KEY_MAX: u8 = 30;
+pub const EXTENSION_KEY_MIN: u8 = 31;
 
-/// KOMMS event type. Known v0 (0..=14) and v1 (15..=20) variants plus a
-/// catch-all [`EventType::Reserved`] for forward-compatible event types
-/// (21..=255 except the ephemeral WS-only range 21..=22, which is still
-/// representable but rejected by [`validate_event`] for on-chain use).
+/// Canonical byte length for the `match_tag` (key 27) and `member_tag`
+/// (key 21) fields. Per `komms_protocol_v_1_1.md` §12.6, both are
+/// truncated HMAC outputs and MUST be exactly 16 bytes on the wire.
+pub const V1_1_TAG_LEN: usize = 16;
+
+/// KOMMS event type. Known v0 (0..=14), v1.0 (15..=20), and v1.1
+/// (23..=26) variants plus a catch-all [`EventType::Reserved`] for
+/// forward-compatible event types. The ephemeral WS-only range
+/// (21..=22) is still representable but rejected by [`validate_event`]
+/// for on-chain use.
 ///
 /// The discriminant of `Reserved(n)` is `n` itself, exposed via
 /// [`EventType::as_u8`]. Pattern-match on `Reserved(_)` to treat any
-/// unknown / future type as opaque.
+/// unknown / future type as opaque; this catch-all already supplies
+/// forward-compat for unknown event types, so the enum is intentionally
+/// not `#[non_exhaustive]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum EventType {
     // v0 core (frozen)
@@ -73,16 +95,34 @@ pub enum EventType {
     RoleAssign,
     RoleRevoke,
     ModerationAction,
-    // v1 core
+    // v1.0 core
     DeviceRegister,
     DeviceRevoke,
     PinMessage,
     UnpinMessage,
     BookmarkAdd,
     BookmarkRemove,
+    // v1.1 core (sealed membership + sealed event wrapper)
+    /// `SEALED_MEMBER_JOIN` (t = 23). Sealed analog of [`MemberJoin`].
+    /// Carries `member_tag` + `member_sealed` instead of `sid` + `pid`.
+    /// Spec: `komms_protocol_v_1_1.md` §12.3.
+    SealedMemberJoin,
+    /// `SEALED_MEMBER_LEAVE` (t = 24). Sealed analog of [`MemberLeave`].
+    /// Spec: `komms_protocol_v_1_1.md` §12.3.
+    SealedMemberLeave,
+    /// `KEY_ROTATE` (t = 25). Rotates the per-server master viewing
+    /// key after a kick or membership change to obtain post-kick
+    /// forward secrecy. Spec: `komms_protocol_v_1_1.md` §12.4.
+    KeyRotate,
+    /// `SEALED_EVENT` (t = 26). Generic envelope for any v1.0 event
+    /// where the entire payload (including the inner event type) is
+    /// encrypted under `enc_scheme = 4`. The inner type is recovered
+    /// from `enc_t` (key 28) after group decryption.
+    /// Spec: `komms_protocol_v_1_1.md` §12.2.
+    SealedEvent,
     /// Any event type not enumerated above. Includes the WS-only
     /// ephemeral range (21..=22) and all reserved / vendor ranges
-    /// (23..=255). Always stored opaquely; never validated structurally.
+    /// (27..=255). Always stored opaquely; never validated structurally.
     Reserved(u8),
 }
 
@@ -111,6 +151,10 @@ impl EventType {
             EventType::UnpinMessage => 18,
             EventType::BookmarkAdd => 19,
             EventType::BookmarkRemove => 20,
+            EventType::SealedMemberJoin => 23,
+            EventType::SealedMemberLeave => 24,
+            EventType::KeyRotate => 25,
+            EventType::SealedEvent => 26,
             EventType::Reserved(n) => n,
         }
     }
@@ -142,6 +186,10 @@ impl EventType {
             18 => EventType::UnpinMessage,
             19 => EventType::BookmarkAdd,
             20 => EventType::BookmarkRemove,
+            23 => EventType::SealedMemberJoin,
+            24 => EventType::SealedMemberLeave,
+            25 => EventType::KeyRotate,
+            26 => EventType::SealedEvent,
             n => EventType::Reserved(n),
         }
     }
@@ -166,9 +214,9 @@ impl TryFrom<u64> for EventType {
 }
 
 /// Parsed KOMMS event after CBOR decode. v0 fields (keys 0..=11) sit
-/// alongside v1 additive fields (keys 12..=20); higher keys are
-/// preserved in [`ParsedKommsEvent::extension_fields`] for forward
-/// compatibility.
+/// alongside v1.0 additive fields (keys 12..=20) and v1.1 additive
+/// fields (keys 21..=30); higher keys are preserved in
+/// [`ParsedKommsEvent::extension_fields`] for forward compatibility.
 ///
 /// `Default` is implemented so callers can construct an event with
 /// struct update syntax:
@@ -186,6 +234,10 @@ impl TryFrom<u64> for EventType {
 /// `Eq` is intentionally NOT derived: `extension_fields` carries
 /// `ciborium::Value` which can contain floats and therefore does not
 /// implement `Eq`. `PartialEq` is sufficient for tests and indexing.
+///
+/// External consumers SHOULD construct via struct-update from
+/// `Default::default()` so future v1.x field additions remain
+/// non-breaking at the call site.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ParsedKommsEvent {
     // --- envelope ---
@@ -205,12 +257,15 @@ pub struct ParsedKommsEvent {
     pub n: Option<u64>,
     pub sig: Option<[u8; 64]>,
 
-    // --- v1 core (keys 12..=20) ---
+    // --- v1.0 core (keys 12..=20) ---
     /// Parent message id for threading (v1 key 12).
     pub parent_mid: Option<[u8; 32]>,
-    /// Encryption scheme: 0=plain, 1=wallet-x25519, 2=MLS-reserved,
-    /// 3=stealth-reserved. v1 key 13. Implicit (`Some(enc as u64)`) for v0
-    /// inputs so downstream consumers can rely on this being populated.
+    /// Encryption scheme: 0=plain, 1=wallet-x25519, 2=DEPRECATED
+    /// (former MLS reservation; rejected from v1.1 onward),
+    /// 3=stealth-reserved (v1.2 Horizon C), 4=group envelope
+    /// (v1.1, ADR-012). v1 key 13. Implicit (`Some(enc as u64)`) for
+    /// v0 inputs so downstream consumers can rely on this being
+    /// populated.
     pub enc_scheme: Option<u64>,
     /// Content kind hint: 0=text, 1=image, 2=video, 3=audio, 4=file,
     /// 5=poll, 6=embed. v1 key 14.
@@ -223,7 +278,9 @@ pub struct ParsedKommsEvent {
     pub ref_type: Option<u64>,
     /// Per-device public key for multi-device key transport. v1 key 17.
     pub device_pk: Option<[u8; 32]>,
-    /// Signature scheme: 0=BIP-340 Schnorr/secp256k1. v1 key 18.
+    /// Signature scheme: 0=BIP-340 Schnorr/secp256k1, 1=bLSAG sealed
+    /// sender (v1.1 reserved, Phase 3 only — current builds reject).
+    /// v1 key 18.
     pub sig_scheme: Option<u64>,
     /// Reaction emoji / id (UTF-8 bytes, max 32). v1 key 19.
     /// Replaces the v0 convention of stuffing the reaction into `ref`.
@@ -231,7 +288,42 @@ pub struct ParsedKommsEvent {
     /// Receipt / payment hint for paid features. v1 key 20.
     pub payment_hint: Option<Vec<u8>>,
 
-    // --- extension / vendor / future (keys 24..=255) ---
+    // --- v1.1 core (keys 21..=30) ---
+    /// Stealth-derived linkable tag for sealed membership events
+    /// (`SEALED_MEMBER_JOIN`, `SEALED_MEMBER_LEAVE`). 16 bytes truncated
+    /// HMAC. v1.1 key 21. Spec: `komms_protocol_v_1_1.md` §12.3.
+    pub member_tag: Option<[u8; 16]>,
+    /// AES-256-GCM ciphertext carrying the member's per-server stealth
+    /// pubkey + identity claim. v1.1 key 22. Spec: §12.3 + ADR-012 §3.2.
+    pub member_sealed: Option<Vec<u8>>,
+    /// Encrypted counterpart to `sid` under `enc_scheme = 4`. v1.1
+    /// key 23. Spec: §1.1 + §12.2.
+    pub enc_sid: Option<Vec<u8>>,
+    /// Encrypted counterpart to `cid`. v1.1 key 24.
+    pub enc_cid: Option<Vec<u8>>,
+    /// Encrypted counterpart to `ref_bytes` (message body / attachment
+    /// pointer). v1.1 key 25.
+    pub enc_body_ref: Option<Vec<u8>>,
+    /// Encrypted counterpart to `parent_mid` (thread parent). v1.1 key 26.
+    pub enc_parent_mid: Option<Vec<u8>>,
+    /// HMAC-derived match tag the indexer uses to fan out an event into
+    /// the correct (server, channel, key-epoch) bucket without learning
+    /// the plaintext id. 16 bytes. v1.1 key 27. Spec: §12.6 + ADR-012 §3.1.
+    pub match_tag: Option<[u8; 16]>,
+    /// Encrypted counterpart to the inner event type when the wrapper
+    /// is `SEALED_EVENT` (t = 26). Carries the true `t` byte plus any
+    /// associated typed-field counterparts in a single AES-GCM payload.
+    /// v1.1 key 28.
+    pub enc_t: Option<Vec<u8>>,
+    /// Key epoch the encrypted fields were sealed under. Monotonic
+    /// per-server counter that increments on `KEY_ROTATE`. v1.1 key 29.
+    pub key_epoch: Option<u64>,
+    /// Sealed-sender signature payload (Phase 3, bLSAG). v1.1 key 30
+    /// reserved; current builds reject any event carrying this field.
+    /// Spec: ADR-013 + §12.5.
+    pub sealed_signer: Option<Vec<u8>>,
+
+    // --- extension / vendor / future (keys 31..=255) ---
     /// Verbatim CBOR values for every map key the parser does not
     /// recognise. Indexers MUST persist these unchanged so a future
     /// build can re-parse them.
@@ -256,6 +348,8 @@ pub enum ParseError {
     ExpectedBool(&'static str),
     #[error("field {0}: expected byte string of length 32")]
     ExpectedBytes32(&'static str),
+    #[error("field {0}: expected byte string of length 16")]
+    ExpectedBytes16(&'static str),
     #[error("field {0}: expected byte string")]
     ExpectedBytes(&'static str),
     #[error("field {0}: expected text string")]
@@ -264,7 +358,9 @@ pub enum ParseError {
     InvalidSigLength,
     #[error("missing required field {0}")]
     MissingField(&'static str),
-    /// Key in v1 core range (0..=23) is reserved and not yet defined.
+    /// Key in v1 core range (0..=30) is reserved and not yet defined.
+    /// Retained for forward compatibility with future v1.x core
+    /// allocations above 30.
     #[error("map key {0} is reserved (not yet allocated in v1 core)")]
     ReservedCoreKey(u8),
 }
@@ -293,6 +389,29 @@ pub enum ValidationError {
     EphemeralOnChain(EventType),
     #[error("event type {0:?} is reserved/opaque; indexers persist but do not validate")]
     OpaqueEventType(EventType),
+    /// v1.1 §12: `enc_scheme = 2` (former MLS reservation) is deprecated
+    /// and rejected by v1.1+ parsers per ADR-012.
+    #[error("enc_scheme = 2 (MLS) was rejected in v1.1 per ADR-012")]
+    DeprecatedEncSchemeMls,
+    /// v1.1 §12.2: `enc_scheme = 4` events MUST carry `match_tag`,
+    /// `key_epoch`, and at least one of the encrypted-counterpart
+    /// fields (`enc_sid`, `enc_cid`, `enc_body_ref`, `enc_parent_mid`,
+    /// `enc_t`).
+    #[error("v1.1 enc_scheme=4 event missing required field {0}")]
+    V1_1MissingField(&'static str),
+    /// v1.1 §12.5: `sig_scheme = 1` (bLSAG sealed sender) is reserved
+    /// for Phase 3 and rejected by current builds.
+    #[error("sig_scheme = 1 (bLSAG) is reserved for Phase 3 (ADR-013); not yet implemented")]
+    SealedSenderNotImplemented,
+    /// v1.1 §12.6: `match_tag` and `member_tag` MUST be exactly 16
+    /// bytes on the wire.
+    #[error("v1.1 tag field {0} must be exactly 16 bytes")]
+    InvalidTagLength(&'static str),
+    /// v1.1 §12.7: rejects unrecognised `enc_scheme` values above the
+    /// current allocation. v1.0 indexers SHOULD persist-and-skip
+    /// instead; this surface is for v1.1+ structural validation.
+    #[error("enc_scheme {0} is not defined in this protocol version")]
+    UnknownEncScheme(u64),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -386,7 +505,7 @@ pub fn parse_cbor_map(cbor: &[u8]) -> Result<ParsedKommsEvent, ParseError> {
         None
     };
 
-    // ----- v1 core (keys 12..=20) -----
+    // ----- v1.0 core (keys 12..=20) -----
     let parent_mid = pop_bytes32(&mut fields, 12, "parent_mid")?;
     let mut enc_scheme = pop_uint_opt(&mut fields, 13, "enc_scheme")?;
     let kind = pop_uint_opt(&mut fields, 14, "kind")?;
@@ -403,16 +522,19 @@ pub fn parse_cbor_map(cbor: &[u8]) -> Result<ParsedKommsEvent, ParseError> {
         enc_scheme = Some(if enc { 1 } else { 0 });
     }
 
-    // v1-core reserved keys (21..=23). Reject loudly — they are not yet
-    // allocated and accepting them would let future allocations break
-    // hash parity once the meaning is decided.
-    for &reserved in &[21u8, 22, 23] {
-        if fields.contains_key(&reserved) {
-            return Err(ParseError::ReservedCoreKey(reserved));
-        }
-    }
+    // ----- v1.1 core (keys 21..=30) -----
+    let member_tag = pop_bytes16(&mut fields, 21, "member_tag")?;
+    let member_sealed = pop_bytes(&mut fields, 22, "member_sealed")?;
+    let enc_sid = pop_bytes(&mut fields, 23, "enc_sid")?;
+    let enc_cid = pop_bytes(&mut fields, 24, "enc_cid")?;
+    let enc_body_ref = pop_bytes(&mut fields, 25, "enc_body_ref")?;
+    let enc_parent_mid = pop_bytes(&mut fields, 26, "enc_parent_mid")?;
+    let match_tag = pop_bytes16(&mut fields, 27, "match_tag")?;
+    let enc_t = pop_bytes(&mut fields, 28, "enc_t")?;
+    let key_epoch = pop_uint_opt(&mut fields, 29, "key_epoch")?;
+    let sealed_signer = pop_bytes(&mut fields, 30, "sealed_signer")?;
 
-    // Extension / vendor keys (24..=255) — preserve verbatim.
+    // Extension / vendor keys (31..=255) — preserve verbatim.
     let mut extension_fields = BTreeMap::new();
     let extension_keys: Vec<u8> = fields
         .range(EXTENSION_KEY_MIN..=u8::MAX)
@@ -425,9 +547,9 @@ pub fn parse_cbor_map(cbor: &[u8]) -> Result<ParsedKommsEvent, ParseError> {
     }
 
     if !fields.is_empty() {
-        // At this point only keys in the v1 core range (0..=23) could
+        // At this point only keys in the v1 core range (0..=30) could
         // remain, and we've consumed every defined one. Anything left is
-        // a not-yet-allocated v1 core key.
+        // a not-yet-allocated v1.x core key.
         let remaining = *fields.keys().next().unwrap();
         return Err(ParseError::ReservedCoreKey(remaining));
     }
@@ -454,6 +576,16 @@ pub fn parse_cbor_map(cbor: &[u8]) -> Result<ParsedKommsEvent, ParseError> {
         sig_scheme,
         reaction_key,
         payment_hint,
+        member_tag,
+        member_sealed,
+        enc_sid,
+        enc_cid,
+        enc_body_ref,
+        enc_parent_mid,
+        match_tag,
+        enc_t,
+        key_epoch,
+        sealed_signer,
         extension_fields,
     })
 }
@@ -488,6 +620,25 @@ fn pop_bytes32(
         return Err(ParseError::ExpectedBytes32(name));
     }
     let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(Some(out))
+}
+
+fn pop_bytes16(
+    fields: &mut BTreeMap<u8, Value>,
+    key: u8,
+    name: &'static str,
+) -> Result<Option<[u8; 16]>, ParseError> {
+    let Some(val) = fields.remove(&key) else {
+        return Ok(None);
+    };
+    let bytes = val
+        .into_bytes()
+        .map_err(|_| ParseError::ExpectedBytes16(name))?;
+    if bytes.len() != V1_1_TAG_LEN {
+        return Err(ParseError::ExpectedBytes16(name));
+    }
+    let mut out = [0u8; 16];
     out.copy_from_slice(&bytes);
     Ok(Some(out))
 }
@@ -607,6 +758,15 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
                 enc: ev.enc,
             });
         }
+        // v1.1 §12.7: gate the enc_scheme allocation. 0 plain, 1
+        // wallet-x25519 (DM lane), 3 stealth (v1.2 reserved, accepted
+        // structurally), 4 group envelope (v1.1). 2 is the deprecated
+        // MLS reservation per ADR-012 and is a hard reject.
+        match scheme {
+            0 | 1 | 3 | 4 => {}
+            2 => return Err(ValidationError::DeprecatedEncSchemeMls),
+            _ => return Err(ValidationError::UnknownEncScheme(scheme)),
+        }
         // v1 §10: ts and n required for replay protection.
         if ev.ts.is_none() {
             return Err(ValidationError::V1MissingField("ts"));
@@ -616,7 +776,60 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
         }
     }
 
+    // v1.1 §12.5 + ADR-013: sealed sender is Phase 3. Any current
+    // build that sees `sig_scheme = 1` or a populated `sealed_signer`
+    // (key 30) MUST reject from projection — the spending witness
+    // verification path is not implemented yet.
+    if matches!(ev.sig_scheme, Some(1)) || ev.sealed_signer.is_some() {
+        return Err(ValidationError::SealedSenderNotImplemented);
+    }
+
+    // v1.1 §12.6 (`member_tag`, `match_tag` = exactly 16 B) is enforced
+    // at parse time by [`pop_bytes16`]. The typed `[u8; 16]` fields on
+    // `ParsedKommsEvent` make the invariant a compile-time guarantee
+    // for in-Rust construction, so no runtime re-check is needed here.
+
+    // v1.1 §12.2: under enc_scheme = 4, every event MUST carry
+    // match_tag + key_epoch and at least one encrypted-counterpart
+    // field. Sealed membership events (t = 23/24/25) carry their
+    // payload in `member_sealed` instead and are exempt from the
+    // "at least one enc_* counterpart" rule here; their per-type
+    // arms below enforce the equivalent requirement.
+    let group_encrypted = ev.enc_scheme == Some(4);
+    if group_encrypted {
+        if ev.match_tag.is_none() {
+            return Err(ValidationError::V1_1MissingField("match_tag"));
+        }
+        if ev.key_epoch.is_none() {
+            return Err(ValidationError::V1_1MissingField("key_epoch"));
+        }
+        let has_enc_counterpart = ev.enc_sid.is_some()
+            || ev.enc_cid.is_some()
+            || ev.enc_body_ref.is_some()
+            || ev.enc_parent_mid.is_some()
+            || ev.enc_t.is_some();
+        let is_sealed_member_event = matches!(
+            ev.t,
+            EventType::SealedMemberJoin | EventType::SealedMemberLeave | EventType::KeyRotate
+        );
+        if !has_enc_counterpart && !is_sealed_member_event {
+            return Err(ValidationError::V1_1MissingField("enc_* counterpart"));
+        }
+    }
+
     use EventType::*;
+
+    // "Effective presence" of v1.0 typed fields under v1.1 enc_scheme=4:
+    // a typed event may carry sid OR enc_sid (etc.) but not neither.
+    // For non-group-encrypted events these reduce to the v1.0 checks.
+    let has_sid = ev.sid.is_some() || (group_encrypted && ev.enc_sid.is_some());
+    let has_cid = ev.cid.is_some() || (group_encrypted && ev.enc_cid.is_some());
+    let has_ref = ev.ref_bytes.is_some() || (group_encrypted && ev.enc_body_ref.is_some());
+
+    // Plain-text `enc=true` bug (i.e. `enc=true` without enc_scheme=4
+    // for events that don't otherwise allow encryption). v1.1 relaxes
+    // typed-event encryption ONLY when enc_scheme=4.
+    let plaintext_enc_misuse = ev.enc && !group_encrypted;
 
     let require = |cond: bool, field: &'static str| -> Result<(), ValidationError> {
         if cond {
@@ -636,50 +849,56 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
 
     match ev.t {
         ServerCreate | ServerUpdate => {
-            require(ev.sid.is_some(), "sid")?;
-            forbid(ev.cid.is_some(), "cid")?;
+            require(has_sid, "sid|enc_sid")?;
+            forbid(ev.cid.is_some() || ev.enc_cid.is_some(), "cid")?;
             forbid(ev.did.is_some(), "did")?;
-            if ev.enc {
+            if plaintext_enc_misuse {
                 return Err(ValidationError::InvalidEnc);
             }
         }
         ChannelCreate | ChannelUpdate => {
-            require(ev.sid.is_some(), "sid")?;
-            require(ev.cid.is_some(), "cid")?;
+            require(has_sid, "sid|enc_sid")?;
+            require(has_cid, "cid|enc_cid")?;
             forbid(ev.did.is_some(), "did")?;
-            if ev.enc {
+            if plaintext_enc_misuse {
                 return Err(ValidationError::InvalidEnc);
             }
         }
         MessagePost => {
-            require(ev.sid.is_some(), "sid")?;
-            require(ev.cid.is_some(), "cid")?;
-            require(ev.ref_bytes.is_some(), "ref")?;
-            forbid(ev.enc, "enc")?;
+            require(has_sid, "sid|enc_sid")?;
+            require(has_cid, "cid|enc_cid")?;
+            require(has_ref, "ref|enc_body_ref")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         MessageEdit => {
-            require(ev.sid.is_some(), "sid")?;
-            require(ev.cid.is_some(), "cid")?;
+            require(has_sid, "sid|enc_sid")?;
+            require(has_cid, "cid|enc_cid")?;
+            // mid is the txid of the parent MESSAGE_POST and is
+            // therefore unavoidably public on chain (it IS the tx hash).
+            // No enc_mid counterpart exists in v1.1.
             require(ev.mid.is_some(), "mid")?;
-            require(ev.ref_bytes.is_some(), "ref")?;
-            forbid(ev.enc, "enc")?;
+            require(has_ref, "ref|enc_body_ref")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         MessageDelete => {
-            require(ev.sid.is_some(), "sid")?;
-            require(ev.cid.is_some(), "cid")?;
+            require(has_sid, "sid|enc_sid")?;
+            require(has_cid, "cid|enc_cid")?;
             require(ev.mid.is_some(), "mid")?;
-            forbid(ev.enc, "enc")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         DmMessagePost => {
+            // DMs stay on enc_scheme=1 in v1.1; v1.2 Horizon-C will add
+            // enc_scheme=3 stealth lane. No encrypted-counterpart
+            // relaxation applies.
             require(ev.did.is_some(), "did")?;
             require(ev.ref_bytes.is_some(), "ref")?;
             require(ev.enc, "enc")?;
-            forbid(ev.sid.is_some(), "sid")?;
-            forbid(ev.cid.is_some(), "cid")?;
+            forbid(ev.sid.is_some() || ev.enc_sid.is_some(), "sid")?;
+            forbid(ev.cid.is_some() || ev.enc_cid.is_some(), "cid")?;
         }
         ReactionAdd | ReactionRemove => {
-            require(ev.sid.is_some(), "sid")?;
-            require(ev.cid.is_some(), "cid")?;
+            require(has_sid, "sid|enc_sid")?;
+            require(has_cid, "cid|enc_cid")?;
             require(ev.mid.is_some(), "mid")?;
             // v0 stuffed the reaction emoji into `ref` (UTF-8 inline). v1
             // adds the dedicated `reaction_key` field. Accept either, but
@@ -687,48 +906,100 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
             if ev.reaction_key.is_none() && ev.ref_bytes.is_none() {
                 return Err(ValidationError::MissingForType(ev.t, "reaction_key|ref"));
             }
-            forbid(ev.enc, "enc")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         MemberJoin | MemberLeave => {
+            // Public-server MEMBER_JOIN/LEAVE. v1.1 sealed analogs are
+            // t = 23/24 — those are validated separately below.
             require(ev.sid.is_some(), "sid")?;
             require(ev.pid.is_some(), "pid")?;
             forbid(ev.cid.is_some(), "cid")?;
             forbid(ev.did.is_some(), "did")?;
-            if ev.enc {
+            if plaintext_enc_misuse {
                 return Err(ValidationError::InvalidEnc);
             }
         }
         RoleAssign | RoleRevoke => {
-            require(ev.sid.is_some(), "sid")?;
-            if ev.enc {
+            require(has_sid, "sid|enc_sid")?;
+            if plaintext_enc_misuse {
                 return Err(ValidationError::InvalidEnc);
             }
         }
         ModerationAction => {
-            require(ev.sid.is_some(), "sid")?;
-            forbid(ev.enc, "enc")?;
+            require(has_sid, "sid|enc_sid")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
-        // ---- v1 core ----
+        // ---- v1.0 core ----
         DeviceRegister => {
             require(ev.device_pk.is_some(), "device_pk")?;
             require(ev.sig.is_some(), "sig")?;
             require(ev.sig_scheme.is_some(), "sig_scheme")?;
-            forbid(ev.enc, "enc")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         DeviceRevoke => {
             require(ev.device_pk.is_some(), "device_pk")?;
             require(ev.sig.is_some(), "sig")?;
-            forbid(ev.enc, "enc")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         PinMessage | UnpinMessage => {
-            require(ev.sid.is_some(), "sid")?;
-            require(ev.cid.is_some(), "cid")?;
+            require(has_sid, "sid|enc_sid")?;
+            require(has_cid, "cid|enc_cid")?;
             require(ev.mid.is_some(), "mid")?;
-            forbid(ev.enc, "enc")?;
+            forbid(plaintext_enc_misuse, "enc")?;
         }
         BookmarkAdd | BookmarkRemove => {
             require(ev.mid.is_some(), "mid")?;
-            forbid(ev.enc, "enc")?;
+            forbid(plaintext_enc_misuse, "enc")?;
+        }
+        // ---- v1.1 core (sealed membership + sealed event wrapper) ----
+        SealedMemberJoin => {
+            // §12.3: member_tag (16B), member_sealed, match_tag (16B),
+            // key_epoch all required. enc_scheme MUST be 4 (already
+            // implied by match_tag/key_epoch presence + group_encrypted
+            // checks above, but re-asserted for self-documenting rules).
+            require(group_encrypted, "enc_scheme=4")?;
+            require(ev.member_tag.is_some(), "member_tag")?;
+            require(ev.member_sealed.is_some(), "member_sealed")?;
+            require(ev.match_tag.is_some(), "match_tag")?;
+            require(ev.key_epoch.is_some(), "key_epoch")?;
+            // Sealed events never carry plaintext server / member /
+            // channel identifiers: that would defeat the entire point.
+            forbid(ev.sid.is_some(), "sid")?;
+            forbid(ev.cid.is_some(), "cid")?;
+            forbid(ev.did.is_some(), "did")?;
+            forbid(ev.pid.is_some(), "pid")?;
+        }
+        SealedMemberLeave => {
+            // §12.3: member_tag + sig required. The sig is the member's
+            // self-signed leave assertion, verified at projection time
+            // against the member's identity covenant pubkey.
+            require(ev.member_tag.is_some(), "member_tag")?;
+            require(ev.sig.is_some(), "sig")?;
+            forbid(ev.sid.is_some(), "sid")?;
+            forbid(ev.cid.is_some(), "cid")?;
+            forbid(ev.did.is_some(), "did")?;
+            forbid(ev.pid.is_some(), "pid")?;
+        }
+        KeyRotate => {
+            // §12.4: member_sealed (wrapped new keys), match_tag,
+            // key_epoch required. Tx-level admin signature verification
+            // happens in the indexer covenant-projection layer.
+            require(group_encrypted, "enc_scheme=4")?;
+            require(ev.member_sealed.is_some(), "member_sealed")?;
+            require(ev.match_tag.is_some(), "match_tag")?;
+            require(ev.key_epoch.is_some(), "key_epoch")?;
+            forbid(ev.sid.is_some(), "sid")?;
+            forbid(ev.cid.is_some(), "cid")?;
+        }
+        SealedEvent => {
+            // §12.2: t=26 is the fully-sealed wrapper. enc_t carries
+            // the true event type plus its typed fields under AEAD.
+            require(group_encrypted, "enc_scheme=4")?;
+            require(ev.enc_t.is_some(), "enc_t")?;
+            forbid(ev.sid.is_some(), "sid")?;
+            forbid(ev.cid.is_some(), "cid")?;
+            forbid(ev.did.is_some(), "did")?;
+            forbid(ev.pid.is_some(), "pid")?;
         }
         // Reserved range — caller chooses to persist & skip.
         Reserved(_) => return Err(ValidationError::OpaqueEventType(ev.t)),
@@ -823,6 +1094,11 @@ mod tests {
 
     #[test]
     fn v0_message_post_requires_ref() {
+        // v1.1 §12.2 widened the per-type field-name reported by
+        // `MissingForType` for MessagePost from "ref" to
+        // "ref|enc_body_ref" so the error message reflects the
+        // accept-either relaxation. v0 payloads (no enc_scheme=4)
+        // surface the same error variant under the new name.
         let raw = v0_envelope(encode_map(vec![
             (Value::Integer(0.into()), Value::Integer(0.into())),
             (Value::Integer(1.into()), Value::Integer(4.into())),
@@ -835,7 +1111,7 @@ mod tests {
             err,
             KommsPayloadError::Validation(ValidationError::MissingForType(
                 EventType::MessagePost,
-                "ref"
+                "ref|enc_body_ref"
             ))
         ));
     }
@@ -999,24 +1275,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reserved_core_key_rejected() {
-        // Manually craft a v0 event with key 21 set (now in the
-        // ephemeral / reserved-core range). parse_cbor_map should reject
-        // before we even reach validate_event.
-        let raw = v0_envelope(encode_map(vec![
-            (Value::Integer(0.into()), Value::Integer(0.into())),
-            (Value::Integer(1.into()), Value::Integer(0.into())),
-            (Value::Integer(2.into()), Value::Bytes(sid().to_vec())),
-            (Value::Integer(8.into()), Value::Bool(false)),
-            (Value::Integer(21.into()), Value::Integer(0.into())),
-        ]));
-        let err = parse_komms_payload(&raw).unwrap_err();
-        assert!(matches!(
-            err,
-            KommsPayloadError::Parse(ParseError::ReservedCoreKey(21))
-        ));
-    }
+    // The original `reserved_core_key_rejected` test guarded against
+    // silent acceptance of v1.0-era reserved keys 21–23. v1.1 allocated
+    // 21–30 (sealed-membership + encrypted counterparts), so that
+    // defensive path is unreachable today. The `ReservedCoreKey` variant
+    // is retained for forward compatibility (future v1.2 core key
+    // allocations above 30), and the test was replaced by the v1.1
+    // round-trip and validation suite below.
 
     #[test]
     fn future_version_returns_future_variant() {
@@ -1064,5 +1329,346 @@ mod tests {
             err,
             KommsPayloadError::Validation(ValidationError::OpaqueEventType(_))
         ));
+    }
+
+    // ---------------------------------------------------------------
+    // v1.1 (Toccata-era) wire-format additions.
+    // Spec: planning-docs/komms_protocol_v_1_1.md §§1, 12.
+    // ---------------------------------------------------------------
+
+    fn match_tag() -> [u8; 16] {
+        [0xAAu8; 16]
+    }
+
+    fn member_tag() -> [u8; 16] {
+        [0xBBu8; 16]
+    }
+
+    /// Minimal v1.1 `SEALED_MEMBER_JOIN` round-trip through the canonical
+    /// CBOR encoder + parser. Verifies every v1.1 key emitted is parsed
+    /// back identically and that the per-type validator accepts the
+    /// event.
+    #[test]
+    fn v1_1_sealed_member_join_roundtrip() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::SealedMemberJoin,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000000),
+            n: Some(1),
+            member_tag: Some(member_tag()),
+            member_sealed: Some(b"sealed-member-blob".to_vec()),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(7),
+            ..Default::default()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn v1_1_sealed_member_leave_roundtrip() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::SealedMemberLeave,
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(1700000001),
+            n: Some(2),
+            sig: Some([0xCCu8; 64]),
+            member_tag: Some(member_tag()),
+            ..Default::default()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn v1_1_key_rotate_roundtrip() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::KeyRotate,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000002),
+            n: Some(3),
+            member_sealed: Some(b"wrapped-new-key".to_vec()),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(8),
+            ..Default::default()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn v1_1_sealed_event_roundtrip() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::SealedEvent,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000003),
+            n: Some(4),
+            enc_t: Some(b"aead-enc-inner-type-payload".to_vec()),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(9),
+            ..Default::default()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    /// v1.1 §12.2: a public-server typed event (e.g. MessagePost) MAY
+    /// run under enc_scheme=4 by carrying enc_sid + enc_cid + enc_body_ref
+    /// in place of the plaintext counterparts. Validates the per-type
+    /// relaxation in `validate_event`.
+    #[test]
+    fn v1_1_enc_scheme_4_typed_message_post_roundtrip() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000004),
+            n: Some(5),
+            enc_sid: Some(b"aead-sid-blob".to_vec()),
+            enc_cid: Some(b"aead-cid-blob".to_vec()),
+            enc_body_ref: Some(b"aead-body-ref-blob".to_vec()),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(10),
+            ..Default::default()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    /// v1.1 §12.2: enc_scheme=4 events without match_tag MUST be
+    /// rejected. The encoder calls validate before emitting bytes.
+    #[test]
+    fn v1_1_enc_scheme_4_missing_match_tag_rejected() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000005),
+            n: Some(6),
+            enc_sid: Some(b"x".to_vec()),
+            enc_cid: Some(b"y".to_vec()),
+            enc_body_ref: Some(b"z".to_vec()),
+            key_epoch: Some(11),
+            ..Default::default()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::V1_1MissingField("match_tag")
+        ));
+    }
+
+    /// v1.1 §12.2: enc_scheme=4 events without ANY encrypted-counterpart
+    /// field (and not a sealed-membership event type) MUST be rejected.
+    #[test]
+    fn v1_1_enc_scheme_4_missing_enc_counterpart_rejected() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000006),
+            n: Some(7),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(12),
+            ..Default::default()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::V1_1MissingField("enc_* counterpart")
+        ));
+    }
+
+    /// v1.1 §12.5 + ADR-013: sig_scheme=1 is reserved for the Phase 3
+    /// sealed-sender rollout. Phase 1/2 builds MUST reject.
+    #[test]
+    fn v1_1_sig_scheme_1_rejected_as_phase_3_reserved() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            sid: Some([1u8; 32]),
+            cid: Some([2u8; 32]),
+            ref_bytes: Some({
+                let mut v = vec![0x01u8];
+                v.extend_from_slice(b"bagaaa");
+                v
+            }),
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(1700000007),
+            n: Some(8),
+            sig_scheme: Some(1),
+            ..Default::default()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::SealedSenderNotImplemented
+        ));
+    }
+
+    /// v1.1 §12.5 (mirror of above): sealed_signer (key 30) populated
+    /// triggers the same Phase 3 reservation guard regardless of
+    /// sig_scheme.
+    #[test]
+    fn v1_1_sealed_signer_field_rejected_as_phase_3_reserved() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::SealedEvent,
+            enc: true,
+            enc_scheme: Some(4),
+            ts: Some(1700000008),
+            n: Some(9),
+            enc_t: Some(b"x".to_vec()),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(13),
+            sealed_signer: Some(b"blsag-ring-sig".to_vec()),
+            ..Default::default()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::SealedSenderNotImplemented
+        ));
+    }
+
+    /// v1.1 §12.7 + ADR-012: enc_scheme=2 (former MLS reservation) is
+    /// deprecated and MUST be rejected.
+    #[test]
+    fn v1_1_deprecated_mls_enc_scheme_rejected() {
+        // Manually craft the wire because the encoder pre-validates.
+        let raw = v0_envelope(encode_map(vec![
+            (Value::Integer(0.into()), Value::Integer(1.into())),
+            (Value::Integer(1.into()), Value::Integer(4.into())),
+            (Value::Integer(2.into()), Value::Bytes(sid().to_vec())),
+            (Value::Integer(3.into()), Value::Bytes([2u8; 32].to_vec())),
+            (Value::Integer(7.into()), Value::Bytes(ref_cid())),
+            (Value::Integer(8.into()), Value::Bool(true)),
+            (Value::Integer(9.into()), Value::Integer(1700000009u64.into())),
+            (Value::Integer(10.into()), Value::Integer(10u64.into())),
+            (Value::Integer(13.into()), Value::Integer(2u64.into())),
+        ]));
+        let err = parse_komms_payload(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            KommsPayloadError::Validation(ValidationError::DeprecatedEncSchemeMls)
+        ));
+    }
+
+    /// v1.1 §12.7: unknown enc_scheme values (>= 5) MUST be rejected by
+    /// the v1.1 validator. v1.0 indexers that don't know about
+    /// enc_scheme=4 will follow a separate persist-and-skip path; that
+    /// is not the surface tested here.
+    #[test]
+    fn v1_1_unknown_enc_scheme_rejected() {
+        let raw = v0_envelope(encode_map(vec![
+            (Value::Integer(0.into()), Value::Integer(1.into())),
+            (Value::Integer(1.into()), Value::Integer(4.into())),
+            (Value::Integer(2.into()), Value::Bytes(sid().to_vec())),
+            (Value::Integer(3.into()), Value::Bytes([2u8; 32].to_vec())),
+            (Value::Integer(7.into()), Value::Bytes(ref_cid())),
+            (Value::Integer(8.into()), Value::Bool(true)),
+            (Value::Integer(9.into()), Value::Integer(1700000010u64.into())),
+            (Value::Integer(10.into()), Value::Integer(11u64.into())),
+            (Value::Integer(13.into()), Value::Integer(42u64.into())),
+        ]));
+        let err = parse_komms_payload(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            KommsPayloadError::Validation(ValidationError::UnknownEncScheme(42))
+        ));
+    }
+
+    /// v1.1 §12.6: member_tag (key 21) wrong length is rejected at
+    /// parse time before validation runs.
+    #[test]
+    fn v1_1_member_tag_wrong_length_rejected() {
+        // 15 bytes (one short).
+        let raw = v0_envelope(encode_map(vec![
+            (Value::Integer(0.into()), Value::Integer(1.into())),
+            (Value::Integer(1.into()), Value::Integer(23.into())),
+            (Value::Integer(8.into()), Value::Bool(true)),
+            (Value::Integer(9.into()), Value::Integer(1700000011u64.into())),
+            (Value::Integer(10.into()), Value::Integer(12u64.into())),
+            (Value::Integer(13.into()), Value::Integer(4u64.into())),
+            (Value::Integer(21.into()), Value::Bytes(vec![0xBBu8; 15])),
+        ]));
+        let err = parse_komms_payload(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            KommsPayloadError::Parse(ParseError::ExpectedBytes16("member_tag"))
+        ));
+    }
+
+    /// v1.1 §12.3: SEALED_MEMBER_JOIN with enc_scheme != 4 is malformed.
+    /// Caught by the per-type validator before bytes hit the wire.
+    #[test]
+    fn v1_1_sealed_member_join_without_group_enc_rejected() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::SealedMemberJoin,
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(1700000012),
+            n: Some(13),
+            member_tag: Some(member_tag()),
+            member_sealed: Some(b"x".to_vec()),
+            match_tag: Some(match_tag()),
+            key_epoch: Some(14),
+            ..Default::default()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        // group_encrypted check fires before per-type because match_tag
+        // is set without enc_scheme=4 → no, actually match_tag is allowed
+        // structurally; the per-type `require(group_encrypted, ...)`
+        // catches it.
+        assert!(matches!(
+            err,
+            ValidationError::MissingForType(EventType::SealedMemberJoin, "enc_scheme=4")
+        ));
+    }
+
+    /// Regression: a v1.0 event (no v1.1 fields) parses on the v1.1
+    /// crate exactly as before. This protects the strict-superset
+    /// claim — `komms_protocol_v_1_1.md` §0.
+    #[test]
+    fn v1_1_parser_accepts_pure_v1_0_event_unchanged() {
+        let ev = ParsedKommsEvent {
+            v: 1,
+            t: EventType::MessagePost,
+            sid: Some([1u8; 32]),
+            cid: Some([2u8; 32]),
+            ref_bytes: Some(ref_cid()),
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(1700000013),
+            n: Some(14),
+            ..Default::default()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed, ev);
+        // Confirm no v1.1 fields leak in:
+        assert!(parsed.member_tag.is_none());
+        assert!(parsed.match_tag.is_none());
+        assert!(parsed.key_epoch.is_none());
+        assert!(parsed.enc_sid.is_none());
+        assert!(parsed.enc_t.is_none());
     }
 }

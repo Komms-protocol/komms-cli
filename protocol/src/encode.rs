@@ -165,7 +165,41 @@ pub fn encode_cbor_map(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError
         pairs.push((bk(20), Value::Bytes(ph.clone())));
     }
 
-    // Extension / vendor (keys 24..=255). BTreeMap iteration is already
+    // v1.1 core (keys 21..=30). Emitted in strict ascending key order so
+    // the canonical-CBOR contract holds. Field semantics live on the
+    // `ParsedKommsEvent` doc comments.
+    if let Some(member_tag) = ev.member_tag {
+        pairs.push((bk(21), Value::Bytes(member_tag.to_vec())));
+    }
+    if let Some(ref member_sealed) = ev.member_sealed {
+        pairs.push((bk(22), Value::Bytes(member_sealed.clone())));
+    }
+    if let Some(ref enc_sid) = ev.enc_sid {
+        pairs.push((bk(23), Value::Bytes(enc_sid.clone())));
+    }
+    if let Some(ref enc_cid) = ev.enc_cid {
+        pairs.push((bk(24), Value::Bytes(enc_cid.clone())));
+    }
+    if let Some(ref enc_body_ref) = ev.enc_body_ref {
+        pairs.push((bk(25), Value::Bytes(enc_body_ref.clone())));
+    }
+    if let Some(ref enc_parent_mid) = ev.enc_parent_mid {
+        pairs.push((bk(26), Value::Bytes(enc_parent_mid.clone())));
+    }
+    if let Some(match_tag) = ev.match_tag {
+        pairs.push((bk(27), Value::Bytes(match_tag.to_vec())));
+    }
+    if let Some(ref enc_t) = ev.enc_t {
+        pairs.push((bk(28), Value::Bytes(enc_t.clone())));
+    }
+    if let Some(key_epoch) = ev.key_epoch {
+        pairs.push((bk(29), Value::Integer(key_epoch.into())));
+    }
+    if let Some(ref sealed_signer) = ev.sealed_signer {
+        pairs.push((bk(30), Value::Bytes(sealed_signer.clone())));
+    }
+
+    // Extension / vendor (keys 31..=255). BTreeMap iteration is already
     // in ascending key order so we can append directly.
     for (key, val) in ev.extension_fields.iter() {
         pairs.push((bk(*key), val.clone()));
