@@ -1,0 +1,19 @@
+# CODEOWNERS — komms-cli
+#
+# Workspace contains the vendored `protocol` crate that several
+# downstream services (komms-miner-submit) take as a path
+# dependency. ADR-004 consolidates this to a standalone crate
+# in Horizon B; until then every protocol-crate change is
+# breaking for downstream consumers and warrants explicit
+# review.
+
+* @argonmining
+
+/protocol/              @argonmining
+/src/                   @argonmining
+
+# Build / CI / dependency policy.
+/.github/workflows/     @argonmining
+/Cargo.toml             @argonmining
+/Cargo.lock             @argonmining
+/deny.toml              @argonmining
