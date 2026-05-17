@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt-clippy:
+    name: fmt + clippy (both crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: cli-fmt-clippy
+
+      - name: rustfmt --check (cli + protocol)
+        run: cargo fmt --all -- --check
+
+      - name: clippy (all targets, all features, locked)
+        # The `protocol` sub-crate is a path-dep declared in
+        # Cargo.toml; `--all-targets` walks it transitively.
+        run: cargo clippy --all-targets --all-features --locked
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: cli-test
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.74.0
+        with:
+          tool: cargo-nextest
+
+      - name: cargo nextest run (locked)
+        # `protocol/tests/parity_fixtures.rs` is the ADR-016
+        # canonical-bytes parity gate that anchors R-E8 cross-language
+        # drift. Keep it on the critical path on every PR.
+        run: cargo nextest run --all-features --locked --no-tests=pass --no-fail-fast
+
+      - name: cargo test --doc (locked)
+        run: cargo test --doc --all-features --locked
+
+  supply-chain:
+    name: supply-chain (deny + audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny + cargo-audit
+        uses: taiki-e/install-action@v2.74.0
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo-deny (advisories, licenses, bans, sources)
+        run: cargo deny --all-features check
+
+      - name: cargo-audit (CVE scan vs Cargo.lock)
+        run: cargo audit --deny warnings

@@ -1,0 +1,78 @@
+# cargo-deny configuration for komms-cli.
+#
+# Schema version 2 (see https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+# — `version` field deprecated; implicit v2 when the legacy
+# `vulnerability` / `notice` / `severity-threshold` keys are absent).
+#
+# Crates in scope: top-level `komms-cli` binary + `protocol`
+# path-dep sub-crate (the canonical KOMMS v0/v1.0/v1.1 wire format
+# vendored here pending ADR-004 consolidation in Horizon B).
+
+[graph]
+all-features = true
+
+[output]
+feature-depth = 1
+
+# -------------------------------------------------------------------
+# Security advisories
+# -------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+# -------------------------------------------------------------------
+# Licenses
+# -------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "OpenSSL",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+exceptions = []
+
+# -------------------------------------------------------------------
+# Crate bans
+# -------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# -------------------------------------------------------------------
+# Source restrictions
+# -------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # Pinned-tag overrides for the Kaspa rusty-kaspa crates that
+    # ship the v1.1.0-rc.2 ABI we depend on (see
+    # `[patch.crates-io]` in this repo's `Cargo.toml`).
+    "https://github.com/kaspanet/rusty-kaspa.git",
+    # `fjall` patched to `improve-write-stalling` branch — same
+    # ABI as komms-indexer to keep state-backend behaviour
+    # consistent for `id new-wallet` keystore writes.
+    "https://github.com/fjall-rs/fjall.git",
+    # `serde_nested_with` 0.2.6 git pin (crates.io publish was
+    # yanked; tagged git source is identical SHA).
+    "https://github.com/murar8/serde_nested_with.git",
+]
