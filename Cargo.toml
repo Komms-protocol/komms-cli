@@ -1,3 +1,12 @@
+# ADR-016 §2 / WS-D.4 — promotes `protocol/` from a transitive path-dep
+# to a first-class workspace member so `cargo test --workspace` runs the
+# `parity_fixtures.rs` cross-language gate every PR. Without this the
+# canonical-bytes invariant has no automated enforcement (`cargo test`
+# from a single-package root does not reach tests/ in path-deps).
+[workspace]
+members = [".", "protocol"]
+resolver = "3"
+
 [package]
 name = "komms-cli"
 version = "0.1.0"

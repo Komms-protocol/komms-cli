@@ -6,26 +6,34 @@
 
 This repo is the **Komms developer CLI** — a standalone Rust
 binary (`komms`) for decoding, posting, reading, and inspecting
-KOMMS payloads on Kaspa. It also houses the **vendored
-`protocol` crate** that other Rust services (`komms-miner-submit`)
-take as a path dependency until ADR-004 consolidates the
-protocol crate into its own repo in Horizon B.
+KOMMS payloads on Kaspa. It is also the **single Rust source of
+truth for the `protocol` crate** that every Komms Rust service
+(`komms-indexer`, `komms-miner-submit`) takes as a sibling-checkout
+path dependency, per ADR-016 §2 (canonical-bytes / cross-language
+parity contract) and WS-D.4 (May 17, 2026).
 
 ## Read this first (mandatory orientation order)
 
 1. **[`komms-planning/KOMMS_PRINCIPLES.md`](../komms-planning/KOMMS_PRINCIPLES.md)**
    — §6 (canonical bytes are one path) is the critical
    principle for this repo, because the `protocol/` crate IS
-   the canonical encoder.
+   the canonical encoder for every Komms service.
 2. **[`komms-planning/komms-protocol/02_MESSAGING_CONTENT.md`](../komms-planning/komms-protocol/02_MESSAGING_CONTENT.md)**
    — the spec the `protocol/` crate implements.
-3. **ADR-004** in
+3. **ADR-004 + ADR-016** in
    [`komms-planning/ARCHITECTURE_DECISIONS.md`](../komms-planning/ARCHITECTURE_DECISIONS.md)
-   — "consolidate to one `komms-protocol` crate". Until that
-   ships, this is the home of the spec implementation.
+   — ADR-016 §2 makes `komms-cli/protocol/` the single Rust
+   source of truth; ADR-004 plans the longer-term consolidation
+   into a dedicated `komms-protocol` repo in Horizon B.
 
 ## Stack
 
+- **Layout**: 2-member Cargo workspace (`.`, `protocol`).
+  Promoting `protocol/` to a workspace member (WS-D.4) is
+  load-bearing because `cargo test --workspace` is the only
+  way to reach `protocol/tests/parity_fixtures.rs`, the
+  ADR-016 canonical-bytes parity gate. A single-package layout
+  silently skips that test surface.
 - **Language**: Rust 2024 edition.
 - **CLI**: `clap 4.5` (derive macros + env).
 - **Codec**: `ciborium` for CBOR; protocol crate owns canonical

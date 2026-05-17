@@ -117,16 +117,16 @@ fn walk_item(cbor: &[u8], pos: &mut usize, depth: u32) -> Result<(), CanonicalEr
             for _ in 0..count {
                 let key_off = *pos;
                 let key = read_uint_key(cbor, pos)?;
-                if let Some(p) = prev_key {
-                    if key <= p {
-                        if key == p {
-                            return Err(CanonicalError::DuplicateKey {
-                                key,
-                                offset: key_off,
-                            });
-                        }
-                        return Err(CanonicalError::KeysOutOfOrder(key_off));
+                if let Some(p) = prev_key
+                    && key <= p
+                {
+                    if key == p {
+                        return Err(CanonicalError::DuplicateKey {
+                            key,
+                            offset: key_off,
+                        });
                     }
+                    return Err(CanonicalError::KeysOutOfOrder(key_off));
                 }
                 prev_key = Some(key);
                 walk_item(cbor, pos, depth + 1)?;
@@ -142,8 +142,8 @@ fn walk_item(cbor: &[u8], pos: &mut usize, depth: u32) -> Result<(), CanonicalEr
             })
         }
         7 => match initial {
-            0xF4 | 0xF5 | 0xF6 | 0xF7 => Ok(()),
-            0xF9 | 0xFA | 0xFB => Err(CanonicalError::FloatForbidden(initial_off)),
+            0xF4..=0xF7 => Ok(()),
+            0xF9..=0xFB => Err(CanonicalError::FloatForbidden(initial_off)),
             _ => Err(CanonicalError::InvalidSimpleValue {
                 value: initial,
                 offset: initial_off,

@@ -725,25 +725,25 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
     // ref_type / ref_bytes inline tag must agree when both are present.
     if let Some(ref r) = ev.ref_bytes {
         validate_ref(r)?;
-        if let Some(rt) = ev.ref_type {
-            if rt > 0xFF || rt as u8 != r[0] {
-                return Err(ValidationError::InvalidRef);
-            }
+        if let Some(rt) = ev.ref_type
+            && (rt > 0xFF || rt as u8 != r[0])
+        {
+            return Err(ValidationError::InvalidRef);
         }
     }
 
     // mime: ASCII, length-bounded.
-    if let Some(ref m) = ev.mime {
-        if m.is_empty() || m.len() > 64 || !m.is_ascii() {
-            return Err(ValidationError::InvalidMime);
-        }
+    if let Some(ref m) = ev.mime
+        && (m.is_empty() || m.len() > 64 || !m.is_ascii())
+    {
+        return Err(ValidationError::InvalidMime);
     }
 
     // reaction_key: non-empty, length-bounded (v1 §5.2 / §10).
-    if let Some(ref rk) = ev.reaction_key {
-        if rk.is_empty() || rk.len() > 32 {
-            return Err(ValidationError::InvalidReactionKey);
-        }
+    if let Some(ref rk) = ev.reaction_key
+        && (rk.is_empty() || rk.len() > 32)
+    {
+        return Err(ValidationError::InvalidReactionKey);
     }
 
     // enc_scheme ↔ enc agreement for v1.
@@ -1517,10 +1517,7 @@ mod tests {
             ..Default::default()
         };
         let err = encode::encode_komms_payload(&ev).unwrap_err();
-        assert!(matches!(
-            err,
-            ValidationError::SealedSenderNotImplemented
-        ));
+        assert!(matches!(err, ValidationError::SealedSenderNotImplemented));
     }
 
     /// v1.1 §12.5 (mirror of above): sealed_signer (key 30) populated
@@ -1542,10 +1539,7 @@ mod tests {
             ..Default::default()
         };
         let err = encode::encode_komms_payload(&ev).unwrap_err();
-        assert!(matches!(
-            err,
-            ValidationError::SealedSenderNotImplemented
-        ));
+        assert!(matches!(err, ValidationError::SealedSenderNotImplemented));
     }
 
     /// v1.1 §12.7 + ADR-012: enc_scheme=2 (former MLS reservation) is
@@ -1560,7 +1554,10 @@ mod tests {
             (Value::Integer(3.into()), Value::Bytes([2u8; 32].to_vec())),
             (Value::Integer(7.into()), Value::Bytes(ref_cid())),
             (Value::Integer(8.into()), Value::Bool(true)),
-            (Value::Integer(9.into()), Value::Integer(1700000009u64.into())),
+            (
+                Value::Integer(9.into()),
+                Value::Integer(1700000009u64.into()),
+            ),
             (Value::Integer(10.into()), Value::Integer(10u64.into())),
             (Value::Integer(13.into()), Value::Integer(2u64.into())),
         ]));
@@ -1584,7 +1581,10 @@ mod tests {
             (Value::Integer(3.into()), Value::Bytes([2u8; 32].to_vec())),
             (Value::Integer(7.into()), Value::Bytes(ref_cid())),
             (Value::Integer(8.into()), Value::Bool(true)),
-            (Value::Integer(9.into()), Value::Integer(1700000010u64.into())),
+            (
+                Value::Integer(9.into()),
+                Value::Integer(1700000010u64.into()),
+            ),
             (Value::Integer(10.into()), Value::Integer(11u64.into())),
             (Value::Integer(13.into()), Value::Integer(42u64.into())),
         ]));
@@ -1604,7 +1604,10 @@ mod tests {
             (Value::Integer(0.into()), Value::Integer(1.into())),
             (Value::Integer(1.into()), Value::Integer(23.into())),
             (Value::Integer(8.into()), Value::Bool(true)),
-            (Value::Integer(9.into()), Value::Integer(1700000011u64.into())),
+            (
+                Value::Integer(9.into()),
+                Value::Integer(1700000011u64.into()),
+            ),
             (Value::Integer(10.into()), Value::Integer(12u64.into())),
             (Value::Integer(13.into()), Value::Integer(4u64.into())),
             (Value::Integer(21.into()), Value::Bytes(vec![0xBBu8; 15])),

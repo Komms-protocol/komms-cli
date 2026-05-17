@@ -37,10 +37,11 @@ jobs:
       - name: rustfmt --check (cli + protocol)
         run: cargo fmt --all -- --check
 
-      - name: clippy (all targets, all features, locked)
-        # The `protocol` sub-crate is a path-dep declared in
-        # Cargo.toml; `--all-targets` walks it transitively.
-        run: cargo clippy --all-targets --all-features --locked
+      - name: clippy (workspace, all targets, all features, locked)
+        # WS-D.4 / ADR-016 §2 promotes `protocol/` to a workspace member
+        # (see Cargo.toml [workspace]). `--workspace` is now load-bearing
+        # because `--all-targets` alone does not reach a non-member crate.
+        run: cargo clippy --workspace --all-targets --all-features --locked
 
   test:
     name: test
@@ -61,14 +62,16 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: cargo nextest run (locked)
-        # `protocol/tests/parity_fixtures.rs` is the ADR-016
-        # canonical-bytes parity gate that anchors R-E8 cross-language
-        # drift. Keep it on the critical path on every PR.
-        run: cargo nextest run --all-features --locked --no-tests=pass --no-fail-fast
+      - name: cargo nextest run (workspace, locked)
+        # `protocol/tests/parity_fixtures.rs` is the ADR-016 canonical-
+        # bytes parity gate that anchors R-E8 cross-language drift.
+        # WS-D.4 made `protocol/` a workspace member explicitly so
+        # `--workspace` reaches it (previously the gate was silently
+        # skipped because cargo test cannot enter a non-member path-dep).
+        run: cargo nextest run --workspace --all-features --locked --no-tests=pass --no-fail-fast
 
-      - name: cargo test --doc (locked)
-        run: cargo test --doc --all-features --locked
+      - name: cargo test --doc (workspace, locked)
+        run: cargo test --doc --workspace --all-features --locked
 
   supply-chain:
     name: supply-chain (deny + audit)
