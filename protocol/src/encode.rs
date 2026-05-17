@@ -87,7 +87,7 @@ pub fn dm_thread_id(addr_a: &[u8], addr_b: &[u8]) -> [u8; 32] {
     sha256_domain(b"KOMMS_DM_V0", &[min_a, max_a])
 }
 
-/// Encode the event map as canonical CBOR. Does NOT include the `KCOM`
+/// Encode the event map as canonical CBOR. Does NOT include the `KOMM`
 /// envelope prefix; use [`encode_komms_payload`] for the full wire
 /// representation.
 ///
@@ -225,7 +225,7 @@ pub fn signing_payload_cbor(ev: &ParsedKommsEvent) -> Result<Vec<u8>, Validation
     encode_cbor_map(&ev)
 }
 
-/// `KCOM` prefix + canonical CBOR for a full transaction payload.
+/// `KOMM` prefix + canonical CBOR for a full transaction payload.
 pub fn encode_komms_payload(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError> {
     let cbor = encode_cbor_map(ev)?;
     let mut out = KOMMS_PAYLOAD_PREFIX.to_vec();

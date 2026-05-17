@@ -10,7 +10,7 @@
 //! ## Public API surface
 //!
 //! - [`parse_komms_payload`] — primary wire-entry parser. Enforces the
-//!   `KCOM` prefix, canonical CBOR (`canonical::validate_canonical`), and
+//!   `KOMM` prefix, canonical CBOR (`canonical::validate_canonical`), and
 //!   v0/v1/v1.1 validation rules. Use this on every byte stream that
 //!   arrives from chain.
 //! - [`parse_cbor_map`] — low-level CBOR-only parser. Does NOT enforce
@@ -43,8 +43,15 @@ pub use encode::{
     participant_id, ref_from_cid_str, ref_from_content_hash, server_id, signing_payload_cbor,
 };
 
-/// 4-byte ASCII envelope prefix: `KCOM`.
-pub const KOMMS_PAYLOAD_PREFIX: [u8; 4] = [0x4B, 0x43, 0x4F, 0x4D];
+/// 4-byte ASCII envelope prefix: `KOMM` (ASCII `K`, `O`, `M`, `M`).
+///
+/// Wire format pre-Toccata used `KCOM` (`[0x4B, 0x43, 0x4F, 0x4D]`);
+/// the prefix was renamed to `KOMM` in May 2026 as part of the
+/// Toccata cut-over (no live mainnet existed at the time, and TN10's
+/// Toccata hard-fork is a natural reset point — see
+/// `komms-planning/ARCHITECTURE_DECISIONS.md` ADR-016 §"Wire-prefix
+/// rename" + `MASTER_PLAN.md` Toccata-rename section).
+pub const KOMMS_PAYLOAD_PREFIX: [u8; 4] = [0x4B, 0x4F, 0x4D, 0x4D];
 
 /// Maximum protocol version this crate parses structurally. Higher `v`
 /// values surface as [`KommsPayloadError::UnsupportedVersion`] so the
