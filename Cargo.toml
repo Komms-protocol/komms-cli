@@ -3,6 +3,7 @@ name = "komms-cli"
 version = "0.1.0"
 edition = "2024"
 description = "Standalone developer CLI for KOMMS payloads (decode, post, read, inspect)"
+license = "Apache-2.0"
 
 [[bin]]
 name = "komms"

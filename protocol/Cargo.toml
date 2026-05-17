@@ -3,6 +3,7 @@ name = "protocol"
 version = "0.2.0"
 edition = "2024"
 description = "KOMMS chain payload (v0, v1.0, v1.1); vendored for komms-cli"
+license = "Apache-2.0"
 
 [dependencies]
 ciborium = "0.2.2"
