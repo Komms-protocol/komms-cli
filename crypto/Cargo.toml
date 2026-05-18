@@ -1,0 +1,31 @@
+[package]
+name = "komms-crypto"
+version = "0.1.0"
+edition = "2024"
+description = "Komms v1.1 encryption primitives: HKDF-SHA-256 + AES-256-GCM + HMAC match/member tags"
+license = "Apache-2.0"
+publish = false  # internal workspace crate; never published to crates.io
+
+[lib]
+name = "komms_crypto"
+path = "src/lib.rs"
+
+[dependencies]
+# Versions pinned directly (not via workspace.dependencies) so this
+# crate is portable across workspaces — it lives in `komms-cli` today
+# but is consumed by the `komms-indexer` workspace + the standalone
+# `komms-gateway` crate via sibling-checkout. Keeping deps explicit
+# means a consumer cargo invocation does not need to share workspace
+# state with `komms-cli` to resolve the build graph.
+aes-gcm = "0.10.3"
+blake2 = "0.10.6"
+faster-hex = "0.10.0"
+hkdf = "0.12.4"
+hmac = "0.12.1"
+sha2 = "0.10.8"
+subtle = "2.6.1"
+thiserror = "2.0.12"
+zeroize = { version = "1.8.1", features = ["derive"] }
+
+[dev-dependencies]
+hex-literal = "0.4.1"

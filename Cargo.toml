@@ -3,8 +3,16 @@
 # `parity_fixtures.rs` cross-language gate every PR. Without this the
 # canonical-bytes invariant has no automated enforcement (`cargo test`
 # from a single-package root does not reach tests/ in path-deps).
+#
+# `crypto/` was promoted from `komms-indexer/crypto/` to this workspace
+# on May 18, 2026 — the same canonical-source-of-truth principle that
+# applies to the wire codec (`protocol`) applies to the shared crypto
+# primitives (HMAC, KDF, AEAD, sealed-sender, state-hash, match-tags).
+# Consumers (`komms-indexer/{indexer,indexer-actors,indexer-db,komms-
+# miner-submit}` + `komms-gateway`) reach this crate via the same
+# sibling-checkout path-dep convention as `protocol`.
 [workspace]
-members = [".", "protocol"]
+members = [".", "protocol", "crypto"]
 resolver = "3"
 
 [package]

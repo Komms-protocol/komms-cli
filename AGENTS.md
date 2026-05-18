@@ -31,17 +31,23 @@ in Horizon B, `komms-gateway` joins the consumer set per ADR-004.
 
 ## Stack
 
-- **Layout**: 2-member Cargo workspace (`.`, `protocol`).
+- **Layout**: 3-member Cargo workspace (`.`, `protocol`, `crypto`).
   Promoting `protocol/` to a workspace member (WS-D.4) is
   load-bearing because `cargo test --workspace` is the only
   way to reach `protocol/tests/parity_fixtures.rs`, the
   ADR-016 canonical-bytes parity gate. A single-package layout
-  silently skips that test surface.
+  silently skips that test surface. `crypto/` was promoted
+  from `komms-indexer/crypto/` on May 18, 2026 (deploy-fix
+  for `komms-gateway` — the gateway's Railway Docker build
+  context could not resolve `../komms-indexer/crypto`; moving
+  the crate to `komms-cli/crypto/` aligns it with the public
+  single-source-of-truth pattern used by `protocol/`).
 - **Language**: Rust 2024 edition.
 - **CLI**: `clap 4.5` (derive macros + env).
 - **Codec**: `ciborium` for CBOR; protocol crate owns canonical
   encoding.
-- **Crypto**: `ed25519-dalek`. Subject to the
+- **Crypto**: `ed25519-dalek` (CLI), `aes-gcm` + `hkdf` + `hmac` +
+  `blake2` (`crypto/`). Subject to the
   [no-hand-rolled-crypto rule](../komms-planning/KOMMS_PRINCIPLES.md#4--no-hand-rolled-crypto)
   (KOMMS_PRINCIPLES §4) — the single source of truth this stack row
   recaps. L13 of
@@ -78,6 +84,7 @@ cargo run -- decode <bytes>      # exercise the CLI
 | `src/main.rs`                         | CLI entrypoint |
 | `src/lib.rs`                          | Library surface for downstream Rust consumers |
 | `protocol/`                           | The canonical-bytes encoder/decoder (workspace member) |
+| `crypto/`                             | Shared Rust crypto primitives — HMAC request-auth, KDF, AEAD, sealed-sender, state-hash, match-tags (workspace member) |
 | `Cargo.toml`                          | Workspace + main `komms` binary |
 | `deny.toml`                           | `cargo-deny` licence + advisory policy |
 | `.github/workflows/`                  | CC-Q.1 baseline CI |
@@ -89,7 +96,8 @@ cargo run -- decode <bytes>      # exercise the CLI
   `protocol = { path = "../komms-cli/protocol" }`
   sibling-checkout path dep (today: the `komms-indexer`
   workspace, which holds both the `indexer` crate and the
-  `komms-miner-submit` crate). It is **byte-for-byte paired
+  `komms-miner-submit` crate, and the standalone
+  `komms-gateway` crate). It is **byte-for-byte paired
   with the `komms-client` TypeScript mirror at
   `komms-client/src/lib/komms/payload/`** via the ADR-016
   parity-fixture pipeline. Any change here ripples to every
@@ -100,15 +108,33 @@ cargo run -- decode <bytes>      # exercise the CLI
      (`cargo test --workspace --nocapture` pipes into the
      `komms-client` fixtures via the WS-CC-Q.5.1 substrate).
   3. Run the canonical-bytes parity tests on both languages.
+- `crypto/` — **shared crypto primitives**. Same single-
+  source-of-truth pattern as `protocol/`. Consumed via the
+  `komms-crypto = { path = "../komms-cli/crypto" }`
+  sibling-checkout path dep by:
+    - `komms-indexer/{indexer, indexer-actors, indexer-db,
+      komms-miner-submit}` (workspace dep declared in
+      `komms-indexer/Cargo.toml`).
+    - `komms-gateway` (direct path dep — gateway is a
+      standalone crate, not a workspace dependent on
+      `komms-indexer`).
+  The HMAC request-auth primitive in `crypto/src/request_auth.rs`
+  is the canonical signer used by the gateway and the canonical
+  verifier used by `komms-miner-submit` + the indexer's WS-upgrade
+  handler — S2 / S4 of `komms-planning/AUDIT_2026-05-17.md §6`
+  prevented silent drift between three near-identical HMAC
+  implementations by consolidating them here.
 - `--submit` feature path (when enabled) — this is the only
   CLI path that talks to a remote miner. Treat like any other
   signing path: fail-closed, no plaintext logs.
 
 Anti-patterns to never ship in this repo:
 
-- Forking a second Rust copy of `protocol/`. WS-D.4 retired
-  the old `komms-indexer/protocol/` vendored copy precisely
-  to eliminate the silent-drift failure class.
+- Forking a second Rust copy of `protocol/` or `crypto/`.
+  WS-D.4 retired the old `komms-indexer/protocol/` vendored
+  copy and the May 18, 2026 deploy-fix retired the
+  `komms-indexer/crypto/` vendored copy — both moves
+  eliminated the silent-drift failure class.
 - Hand-coded CBOR. The protocol crate uses `ciborium` because
   ciborium produces deterministic encodings; rolling your own
   byte-pack breaks parity.
