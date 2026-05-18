@@ -7,10 +7,13 @@
 This repo is the **Komms developer CLI** — a standalone Rust
 binary (`komms`) for decoding, posting, reading, and inspecting
 KOMMS payloads on Kaspa. It is also the **single Rust source of
-truth for the `protocol` crate** that every Komms Rust service
-(`komms-indexer`, `komms-miner-submit`) takes as a sibling-checkout
-path dependency, per ADR-016 §2 (canonical-bytes / cross-language
-parity contract) and WS-D.4 (May 17, 2026).
+truth for the `protocol` crate** that every other Komms Rust
+service takes as a sibling-checkout path dependency, per
+ADR-016 §2 (canonical-bytes / cross-language parity contract)
+and WS-D.4 (May 17, 2026). Today the only consumer workspace is
+`komms-indexer` (which holds both the `indexer` and the
+`komms-miner-submit` crates after the May 18, 2026 consolidation);
+in Horizon B, `komms-gateway` joins the consumer set per ADR-004.
 
 ## Read this first (mandatory orientation order)
 
@@ -77,23 +80,31 @@ cargo run -- decode <bytes>      # exercise the CLI
 
 ## Hot wires (security-touching)
 
-- `protocol/` — **shared with `komms-miner-submit` via path
-  dependency** and **byte-for-byte paired with
-  `komms-indexer/protocol/`**. Any change here ripples to
-  two other repos. Always:
+- `protocol/` — **the single Rust source of truth** consumed
+  by every other Komms Rust service via the
+  `protocol = { path = "../komms-cli/protocol" }`
+  sibling-checkout path dep (today: the `komms-indexer`
+  workspace, which holds both the `indexer` crate and the
+  `komms-miner-submit` crate). It is **byte-for-byte paired
+  with the `komms-client` TypeScript mirror at
+  `komms-client/src/lib/komms/payload/`** via the ADR-016
+  parity-fixture pipeline. Any change here ripples to every
+  downstream crate that does a sibling-checkout build.
+  Always:
   1. Update the protocol crate.
-  2. Update `komms-indexer/protocol/` in the same logical PR
-     (cross-repo coordination).
-  3. Run the canonical-bytes parity tests on both sides.
+  2. Regenerate parity fixtures
+     (`cargo test --workspace --nocapture` pipes into the
+     `komms-client` fixtures via the WS-CC-Q.5.1 substrate).
+  3. Run the canonical-bytes parity tests on both languages.
 - `--submit` feature path (when enabled) — this is the only
   CLI path that talks to a remote miner. Treat like any other
   signing path: fail-closed, no plaintext logs.
 
 Anti-patterns to never ship in this repo:
 
-- Diverging the `protocol/` crate from
-  `komms-indexer/protocol/`. They are one spec implemented
-  twice (until ADR-004 lands).
+- Forking a second Rust copy of `protocol/`. WS-D.4 retired
+  the old `komms-indexer/protocol/` vendored copy precisely
+  to eliminate the silent-drift failure class.
 - Hand-coded CBOR. The protocol crate uses `ciborium` because
   ciborium produces deterministic encodings; rolling your own
   byte-pack breaks parity.
@@ -119,15 +130,20 @@ Anti-patterns to never ship in this repo:
 - Hold any keys. The CLI signs only when the user supplies a
   key explicitly (env var or arg); it does not persist them.
 - Ship as a service. The `submit` feature is for testing;
-  production submission goes through `komms-miner-submit`.
+  production submission goes through the `komms-miner-submit`
+  crate inside the `komms-indexer` workspace
+  (`komms-indexer/komms-miner-submit/`).
 
 ## When stuck
 
-- **`komms-miner-submit` build fails after a protocol change**:
-  the sibling-checkout path dep in that repo expects
-  `../komms-cli/protocol`. If you renamed or moved the crate,
-  update the downstream `Cargo.toml`.
+- **A sibling-checkout build of `komms-indexer` (or any future
+  Rust consumer) fails after a protocol change**: every
+  downstream workspace expects this repo to live at
+  `../komms-cli/` relative to its own root. If you renamed or
+  moved the protocol crate inside this repo, update the
+  downstream `Cargo.toml` workspace path dep accordingly.
 - **A canonical-bytes parity test fails between this crate and
-  `komms-indexer/protocol/`**: see KOMMS_PRINCIPLES §6 — there
-  is one spec; pick which side has the bug and fix that side,
-  do not silently diverge.
+  the `komms-client` TypeScript mirror**: see
+  KOMMS_PRINCIPLES §6 + ADR-016 §2 — there is one spec; pick
+  which side has the bug and fix that side, do not silently
+  diverge.
