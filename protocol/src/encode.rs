@@ -140,8 +140,26 @@ pub fn encode_cbor_map(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError
     if let Some(parent_mid) = ev.parent_mid {
         pairs.push((bk(12), Value::Bytes(parent_mid.to_vec())));
     }
-    if let Some(scheme) = ev.enc_scheme {
-        pairs.push((bk(13), Value::Integer(scheme.into())));
+    // v0 events never carry key 13 (enc_scheme) on the wire by spec —
+    // the encryption posture is fully captured by key 8 (enc: bool).
+    // `parse_komms_payload` synthesizes `enc_scheme = Some(enc as u64)`
+    // for v0 inputs so downstream consumers can read a uniform field
+    // regardless of envelope version (see `parse.rs` "v0 inputs don't
+    // have key 13" branch). Re-emitting that synthetic value on encode
+    // would break the canonical-CBOR contract: a parse→encode roundtrip
+    // would silently add key 13, bumping the map header from `aN` to
+    // `a(N+1)` and producing payload bytes that don't match what the
+    // sender signed. `komms-miner-submit` does exactly that roundtrip
+    // before broadcast (submit.rs: `parse_komms_payload` →
+    // `encode_komms_payload`), so any v0 client that verifies the
+    // on-chain payload bytes against its signed bytes (which the
+    // production client does as an integrity guard against payload-
+    // substituting gateways/miners) would otherwise reject every
+    // legitimate v0 broadcast as hostile substitution.
+    if ev.v != 0 {
+        if let Some(scheme) = ev.enc_scheme {
+            pairs.push((bk(13), Value::Integer(scheme.into())));
+        }
     }
     if let Some(kind) = ev.kind {
         pairs.push((bk(14), Value::Integer(kind.into())));
@@ -271,6 +289,94 @@ mod tests {
         let raw = encode_komms_payload(&ev).unwrap();
         let parsed = crate::parse_komms_payload(&raw).unwrap();
         assert_eq!(parsed, ev);
+    }
+
+    /// Regression: a v0 event's wire bytes MUST survive a
+    /// parse→encode roundtrip unchanged. Before the fix that gated
+    /// key-13 emission on `v != 0`, the parser synthesized
+    /// `enc_scheme = Some(enc as u64)` for v0 inputs (so downstream
+    /// consumers could read a uniform field), and the encoder then
+    /// emitted that synthetic value as a sixth map entry, bumping the
+    /// map header from `aN` to `a(N+1)` and producing payload bytes
+    /// that did not match what the sender signed.
+    /// `komms-miner-submit` does exactly that roundtrip before
+    /// broadcast, so a production client verifying on-chain payload
+    /// bytes against its signed bytes would reject every legitimate
+    /// v0 submit as hostile gateway substitution. This test pins the
+    /// invariant for every v0 event shape the production client emits
+    /// (the same set that `tests/parity_fixtures.rs` cross-checks
+    /// against the TypeScript client).
+    #[test]
+    fn v0_event_roundtrip_is_byte_identical() {
+        let cases: &[(&str, ParsedKommsEvent)] = &[
+            (
+                "v0_server_create",
+                ParsedKommsEvent {
+                    v: 0,
+                    t: EventType::ServerCreate,
+                    sid: Some([0x11; 32]),
+                    enc: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "v0_message_post_plain",
+                ParsedKommsEvent {
+                    v: 0,
+                    t: EventType::MessagePost,
+                    sid: Some([0x22; 32]),
+                    cid: Some([0x33; 32]),
+                    ref_bytes: Some(ref_cid()),
+                    enc: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "v0_dm_message_post_encrypted",
+                ParsedKommsEvent {
+                    v: 0,
+                    t: EventType::DmMessagePost,
+                    did: Some([0x44; 32]),
+                    ref_bytes: Some(ref_cid()),
+                    enc: true,
+                    ts: Some(1_700_000_000),
+                    n: Some(7),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v0_member_join",
+                ParsedKommsEvent {
+                    v: 0,
+                    t: EventType::MemberJoin,
+                    sid: Some([0x55; 32]),
+                    pid: Some([0x66; 32]),
+                    enc: false,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (label, ev) in cases {
+            let original = encode_komms_payload(ev).unwrap_or_else(|e| {
+                panic!("{label}: initial encode failed: {e:?}")
+            });
+            let parsed = crate::parse_komms_payload(&original)
+                .unwrap_or_else(|e| panic!("{label}: parse failed: {e:?}"));
+            let reenc = encode_komms_payload(&parsed)
+                .unwrap_or_else(|e| panic!("{label}: re-encode failed: {e:?}"));
+            assert_eq!(
+                original, reenc,
+                "{label}: parse→encode roundtrip mutated wire bytes \
+                 (original map header 0x{:02x}, re-encoded 0x{:02x})",
+                original[4], reenc[4],
+            );
+            // And explicitly: the parser still synthesized enc_scheme,
+            // we just don't emit it for v0.
+            assert!(
+                parsed.enc_scheme.is_some(),
+                "{label}: parser must still surface synthetic enc_scheme for v0 downstream consumers",
+            );
+        }
     }
 
     #[test]
