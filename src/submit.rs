@@ -24,14 +24,48 @@ use protocol::ParsedKommsEvent;
 use protocol::encode_komms_payload;
 use secp256k1::{Keypair, SecretKey};
 
-const FEE_RATE: u64 = 10;
+// Kaspad's mempool relay-fee floor, per
+// `wallet/core/src/tx/mass.rs::MINIMUM_RELAY_TRANSACTION_FEE` at tn10-toc2:
+// `100_000 sompi / kg` of mass, i.e. exactly `100 sompi / gram`. Kaspad
+// rejects with `transaction has X fees which is under the required amount
+// of Y for compute mass M` when `fee < mass * 100 + priority_fee`. The old
+// `FEE_RATE = 10` constant predated the Toccata fee schedule and was 10x
+// too low, AND the byte-count heuristic below ignored payload bytes —
+// together those two defects under-paid the fee by ~14x for a typical
+// 72-byte KOMMS join event (paid 12_340 vs required 170_700 sompi).
+const MIN_RELAY_FEE_PER_GRAM: u64 = 100;
 
-fn estimated_mass(num_utxos: usize, num_outs: u64) -> u64 {
-    200 + 34 * num_outs + 1000 * (num_utxos as u64)
+/// Conservative upper-bound estimate of the kaspad-assigned compute mass
+/// for a signed Schnorr P2PK transaction with `num_utxos` inputs, `num_outs`
+/// P2PK outputs, and `payload_len` bytes of payload.
+///
+/// The decomposition exactly mirrors
+/// `kaspa_consensus_core::mass::MassCalculator::calc_non_contextual_masses`
+/// at rusty-kaspa tag `tn10-toc2`. Constants embedded here (mass_per_tx_byte
+/// = 1, mass_per_script_pub_key_byte = 10, GRAMS_PER_SIGOP_COUNT_UNIT =
+/// 1000, P2PK script length = 35, signed Schnorr sig_script length = 66)
+/// are stable consensus parameters / well-known script byte counts.
+fn predicted_compute_mass(num_utxos: usize, num_outs: u64, payload_len: usize) -> u64 {
+    const BASE_TX_BYTES: u64 = 94;
+    const SIGNED_P2PK_INPUT_BYTES: u64 = 118;
+    const P2PK_OUTPUT_BYTES: u64 = 53;
+    const P2PK_SCRIPT_PUB_KEY_LEN: u64 = 35;
+    const MASS_PER_TX_BYTE: u64 = 1;
+    const MASS_PER_SCRIPT_PUB_KEY_BYTE: u64 = 10;
+    const GRAMS_PER_SIGOP: u64 = 1000;
+
+    let serialized_size = BASE_TX_BYTES
+        + SIGNED_P2PK_INPUT_BYTES * num_utxos as u64
+        + P2PK_OUTPUT_BYTES * num_outs
+        + payload_len as u64;
+    let compute_for_size = serialized_size * MASS_PER_TX_BYTE;
+    let output_spk_mass = (2 + P2PK_SCRIPT_PUB_KEY_LEN) * MASS_PER_SCRIPT_PUB_KEY_BYTE * num_outs;
+    let script_mass = GRAMS_PER_SIGOP * num_utxos as u64;
+    compute_for_size + output_spk_mass + script_mass
 }
 
-fn required_fee(num_utxos: usize, num_outs: u64, priority_fee: u64) -> u64 {
-    FEE_RATE * estimated_mass(num_utxos, num_outs) + priority_fee
+fn required_fee(num_utxos: usize, num_outs: u64, payload_len: usize, priority_fee: u64) -> u64 {
+    MIN_RELAY_FEE_PER_GRAM * predicted_compute_mass(num_utxos, num_outs, payload_len) + priority_fee
 }
 
 pub async fn submit_komms_payload(
@@ -56,7 +90,7 @@ pub async fn submit_komms_payload(
         .context("get_utxos_by_addresses")?;
 
     let (picked, _total_in, _fee, output_value) =
-        pick_utxos(&entries, priority_fee).context("UTXO selection")?;
+        pick_utxos(&entries, payload.len(), priority_fee).context("UTXO selection")?;
 
     let script = pay_to_address_script(change_address);
     let inputs: Vec<TransactionInput> = picked
@@ -163,6 +197,7 @@ pub async fn submit_komms_payload(
 
 fn pick_utxos(
     entries: &[RpcUtxosByAddressesEntry],
+    payload_len: usize,
     priority_fee: u64,
 ) -> anyhow::Result<(Vec<RpcUtxosByAddressesEntry>, u64, u64, u64)> {
     let mut v: Vec<_> = entries.to_vec();
@@ -174,7 +209,7 @@ fn pick_utxos(
         sum += e.utxo_entry.amount;
         picked.push(e);
         let n = picked.len();
-        let fee = required_fee(n, 1, priority_fee);
+        let fee = required_fee(n, 1, payload_len, priority_fee);
         if sum > fee {
             let out = sum - fee;
             if out > 0 {
