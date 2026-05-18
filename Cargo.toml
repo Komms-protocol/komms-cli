@@ -53,11 +53,11 @@ fjall = { version = "2.11.2", default-features = false, features = [
     "miniz",
     "ssi_tx",
 ] }
-kaspa-addresses = "1.1.0-rc.2"
-kaspa-consensus-core = "1.1.0-rc.2"
-kaspa-rpc-core = "1.1.0-rc.2"
-kaspa-txscript = "1.1.0-rc.2"
-kaspa-wrpc-client = "1.1.0-rc.2"
+kaspa-addresses = "1.2.0-toc.2"
+kaspa-consensus-core = "1.2.0-toc.2"
+kaspa-rpc-core = "1.2.0-toc.2"
+kaspa-txscript = "1.2.0-toc.2"
+kaspa-wrpc-client = "1.2.0-toc.2"
 postcard = { version = "1.0.8", features = ["use-std"] }
 protocol = { path = "protocol" }
 serde = { version = "1.0", features = ["derive"] }
@@ -67,12 +67,12 @@ tokio = { version = "1.45", features = ["rt-multi-thread", "macros"] }
 secp256k1 = { version = "0.29", features = ["global-context", "rand"] }
 
 [patch.crates-io]
-kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v1.1.0-rc.2" }
-kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v1.1.0-rc.2" }
-kaspa-math = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v1.1.0-rc.2" }
-kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v1.1.0-rc.2" }
-kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v1.1.0-rc.2" }
-kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v1.1.0-rc.2" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "tn10-toc2" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "tn10-toc2" }
+kaspa-math = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "tn10-toc2" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "tn10-toc2" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "tn10-toc2" }
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "tn10-toc2" }
 
 fjall = { git = "https://github.com/fjall-rs/fjall.git", branch = "improve-write-stalling" }
 serde_nested_with = { git = "https://github.com/murar8/serde_nested_with.git", tag = "0.2.6" }

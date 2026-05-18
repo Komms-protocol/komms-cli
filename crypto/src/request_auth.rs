@@ -131,6 +131,13 @@ pub fn sign(
 /// Verify the per-caller HMAC envelope of an incoming request. On
 /// success returns the matched caller id; on failure returns a
 /// typed [`RequestAuthError`].
+//
+// Eight parameters intentionally — splitting the verify surface into a
+// `Request` builder struct buys no readability here and would force every
+// caller in the gateway + miner-submit hot paths to allocate a temporary
+// just to satisfy a lint. The signature is part of the public API; the
+// allow is local to the function.
+#[allow(clippy::too_many_arguments)]
 pub fn verify(
     secrets: &BTreeMap<String, Vec<u8>>,
     method: &str,

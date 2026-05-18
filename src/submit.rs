@@ -81,10 +81,13 @@ pub async fn submit_komms_payload(
         .map(|e| UtxoEntry::from(e.utxo_entry.clone()))
         .collect();
 
+    // Toccata-era `TransactionInput` replaces the flat `sig_op_count: u8`
+    // field with `mass: TxInputMass` (enum of `SigopCount(u8)` for v0 txs
+    // / `ComputeBudget(u16)` for v1 = `TX_VERSION_TOCCATA`). The
+    // `TransactionInput::new(..,1)` constructor above already wraps the
+    // sig-op count in `TxInputMass::SigopCount(1)`, so no per-input
+    // post-construction mass assignment is required for our v0 txs.
     let mut signable = MutableTransaction::with_entries(unsigned, utxo_entries);
-    for i in 0..signable.tx.inputs.len() {
-        signable.tx.inputs[i].sig_op_count = 1;
-    }
 
     let reused = SigHashReusedValuesUnsync::new();
     let sighash_byte = SIG_HASH_ALL.to_u8();
@@ -133,11 +136,19 @@ pub async fn submit_komms_payload(
 
     let params = Params::from(network_type);
     let calc = MassCalculator::new_with_consensus_params(&params);
+    // Toccata split the single-scalar mass into three dimensions
+    // (compute / transient / storage). The scalar consensus mass is
+    // recovered by normalising both `NonContextualMasses` (compute +
+    // transient) and `ContextualMasses` (storage) into the compute-mass
+    // reference scale via the active block-mass cofactors. We pin to the
+    // mempool cofactors so the mass we set matches the value the mempool
+    // will re-derive during admission.
     let non = calc.calc_non_contextual_masses(signed.tx.as_ref());
     let ctx = calc
         .calc_contextual_masses(&signed.as_verifiable())
         .context("contextual mass")?;
-    let mass = ctx.max(non);
+    let cofactors = params.mempool_block_mass_cofactors().after();
+    let mass = kaspa_consensus_core::mass::Mass::new(non, ctx).normalized_max(&cofactors);
 
     let final_tx = signed.tx;
     final_tx.set_mass(mass);
