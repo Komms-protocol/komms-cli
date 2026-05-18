@@ -32,6 +32,7 @@
 
 pub mod canonical;
 pub mod encode;
+pub mod verify;
 
 use ciborium::Value;
 use std::collections::BTreeMap;
@@ -42,6 +43,7 @@ pub use encode::{
     RefBuildError, channel_id, dm_thread_id, encode_cbor_map, encode_komms_payload, message_id,
     participant_id, ref_from_cid_str, ref_from_content_hash, server_id, signing_payload_cbor,
 };
+pub use verify::{SignerPubkey, VerifyError, signer_pubkey_from_event, verify_event};
 
 /// 4-byte ASCII envelope prefix: `KOMM` (ASCII `K`, `O`, `M`, `M`).
 ///
@@ -63,14 +65,33 @@ pub const MAX_KNOWN_VERSION: u64 = 1;
 /// [`EXTENSION_KEY_MIN`]..=255 are preserved opaquely as
 /// `extension_fields`. Bumped in v1.1 from 23 → 30 to cover the sealed
 /// membership and encrypted-identifier allocations (`komms_protocol_v_1_1.md`
-/// §1.1).
-pub const V1_CORE_KEY_MAX: u8 = 30;
-pub const EXTENSION_KEY_MIN: u8 = 31;
+/// §1.1). Bumped in v1.2-pre to 32 for the role-management
+/// fields (H6 of `komms-planning/AUDIT_2026-05-17.md`); pre-fix,
+/// `ROLE_ASSIGN` and `ROLE_REVOKE` events were structurally
+/// unusable because the canonical bytes carried no `target` or
+/// `role` field — the validator accepted them but no consumer
+/// could derive *who* gets *what* permission. Closes
+/// `komms-protocol/04_PERMISSIONS.md §3.5`.
+pub const V1_CORE_KEY_MAX: u8 = 32;
+pub const EXTENSION_KEY_MIN: u8 = 33;
 
 /// Canonical byte length for the `match_tag` (key 27) and `member_tag`
 /// (key 21) fields. Per `komms_protocol_v_1_1.md` §12.6, both are
 /// truncated HMAC outputs and MUST be exactly 16 bytes on the wire.
 pub const V1_1_TAG_LEN: usize = 16;
+
+/// Role enum values for `ROLE_ASSIGN` / `ROLE_REVOKE` (key 31 on
+/// the wire). Mirrors `komms-protocol/04_PERMISSIONS.md §3.5`.
+/// Validators MUST reject any value outside this set.
+pub const ROLE_ADMIN: u8 = 0;
+pub const ROLE_MODERATOR: u8 = 1;
+pub const ROLE_MEMBER: u8 = 2;
+pub const ROLE_VIEWER: u8 = 3;
+pub const ROLE_BANNED: u8 = 4;
+
+/// Highest allocated `role` enum value. Anything > this is
+/// rejected at validate time.
+pub const ROLE_MAX: u8 = ROLE_BANNED;
 
 /// KOMMS event type. Known v0 (0..=14), v1.0 (15..=20), and v1.1
 /// (23..=26) variants plus a catch-all [`EventType::Reserved`] for
@@ -285,9 +306,21 @@ pub struct ParsedKommsEvent {
     pub ref_type: Option<u64>,
     /// Per-device public key for multi-device key transport. v1 key 17.
     pub device_pk: Option<[u8; 32]>,
-    /// Signature scheme: 0=BIP-340 Schnorr/secp256k1, 1=bLSAG sealed
-    /// sender (v1.1 reserved, Phase 3 only — current builds reject).
-    /// v1 key 18.
+    /// Signature scheme for `sig` (key 11). v1 key 18.
+    ///
+    /// - `0` (default) = **Ed25519 over the canonical CBOR signing
+    ///   payload** ([`crate::encode::signing_payload_cbor`]). This is
+    ///   the canonical Komms-identity signature scheme per ADR-013 +
+    ///   `komms-protocol/05_ENCRYPTION_POSTURE.md` §"Wire crypto
+    ///   stack" + `komms-protocol/02_MESSAGING_CONTENT.md` §"Key 11".
+    ///   The pre-Toccata draft erroneously labelled this slot
+    ///   "BIP-340 Schnorr/secp256k1" — that was the Kasia-compat
+    ///   migration path Komms abandoned in ADR-013 (Komms specifies
+    ///   Ed25519 to stay compatible with the v1 MLS ciphersuite
+    ///   `MLS_256_MLKEM768_X25519_AES256GCM_SHA256_Ed25519`). Closed
+    ///   by B2 of `AUDIT_2026-05-17.md`.
+    /// - `1` = bLSAG sealed sender (v1.1 reserved, Phase 3 only —
+    ///   current builds reject; see [`ValidationError::SealedSenderNotImplemented`]).
     pub sig_scheme: Option<u64>,
     /// Reaction emoji / id (UTF-8 bytes, max 32). v1 key 19.
     /// Replaces the v0 convention of stuffing the reaction into `ref`.
@@ -330,7 +363,24 @@ pub struct ParsedKommsEvent {
     /// Spec: ADR-013 + §12.5.
     pub sealed_signer: Option<Vec<u8>>,
 
-    // --- extension / vendor / future (keys 31..=255) ---
+    // --- v1.2-pre role-management (keys 31..=32) ---
+    /// Role-management `role` enum. v1.2-pre key 31. Required on
+    /// `ROLE_ASSIGN`; optional on `ROLE_REVOKE` (omitting means
+    /// "revoke every role this target currently holds in this
+    /// scope" per `komms-protocol/04_PERMISSIONS.md §3.5`).
+    /// Validators MUST reject values > [`ROLE_MAX`]. H6 of
+    /// `komms-planning/AUDIT_2026-05-17.md`.
+    pub role: Option<u8>,
+    /// Role-management target address. v1.2-pre key 32. Variable-
+    /// length byte string carrying the canonical creator-address
+    /// body (`version || payload`, e.g. 33 bytes for Schnorr
+    /// addresses). Required on both `ROLE_ASSIGN` and
+    /// `ROLE_REVOKE`. Validators MUST refuse a `target` shorter
+    /// than 2 bytes (1-byte version + ≥ 1-byte payload). H6 of
+    /// `komms-planning/AUDIT_2026-05-17.md`.
+    pub target: Option<Vec<u8>>,
+
+    // --- extension / vendor / future (keys 33..=255) ---
     /// Verbatim CBOR values for every map key the parser does not
     /// recognise. Indexers MUST persist these unchanged so a future
     /// build can re-parse them.
@@ -419,6 +469,18 @@ pub enum ValidationError {
     /// instead; this surface is for v1.1+ structural validation.
     #[error("enc_scheme {0} is not defined in this protocol version")]
     UnknownEncScheme(u64),
+    /// H6 of `komms-planning/AUDIT_2026-05-17.md`: the `role`
+    /// byte on `ROLE_ASSIGN` / `ROLE_REVOKE` (key 31) must be
+    /// one of the values in `04_PERMISSIONS.md §3.5`
+    /// (0=Admin, 1=Moderator, 2=Member, 3=Viewer, 4=Banned).
+    #[error("role enum value {0} is not defined (0..={max})", max = crate::ROLE_MAX)]
+    UnknownRole(u8),
+    /// H6 of `komms-planning/AUDIT_2026-05-17.md`: the `target`
+    /// byte string on `ROLE_ASSIGN` / `ROLE_REVOKE` (key 32)
+    /// must carry at least a 1-byte address version + ≥ 1-byte
+    /// payload. Anything shorter is a malformed grant.
+    #[error("target address bytes must be ≥ 2 bytes (got {0})")]
+    InvalidTargetLength(usize),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -541,7 +603,20 @@ pub fn parse_cbor_map(cbor: &[u8]) -> Result<ParsedKommsEvent, ParseError> {
     let key_epoch = pop_uint_opt(&mut fields, 29, "key_epoch")?;
     let sealed_signer = pop_bytes(&mut fields, 30, "sealed_signer")?;
 
-    // Extension / vendor keys (31..=255) — preserve verbatim.
+    // ----- v1.2-pre role-management (keys 31..=32) -----
+    // H6 of `komms-planning/AUDIT_2026-05-17.md`. CBOR sees
+    // `role` as a uint; we clamp to u8 here so downstream
+    // validators work on the typed-byte form. Values outside
+    // 0..=255 saturate at u8::MAX, which then surfaces as
+    // `ValidationError::UnknownRole` at validate time —
+    // chosen over a parse-time hard error so an out-of-range
+    // role doesn't escalate to a parse failure that would
+    // drop the whole event.
+    let role = pop_uint_opt(&mut fields, 31, "role")?
+        .map(|v| if v > u8::MAX as u64 { u8::MAX } else { v as u8 });
+    let target = pop_bytes(&mut fields, 32, "target")?;
+
+    // Extension / vendor keys (33..=255) — preserve verbatim.
     let mut extension_fields = BTreeMap::new();
     let extension_keys: Vec<u8> = fields
         .range(EXTENSION_KEY_MIN..=u8::MAX)
@@ -593,6 +668,8 @@ pub fn parse_cbor_map(cbor: &[u8]) -> Result<ParsedKommsEvent, ParseError> {
         enc_t,
         key_epoch,
         sealed_signer,
+        role,
+        target,
         extension_fields,
     })
 }
@@ -708,6 +785,35 @@ pub fn validate_ref(ref_bytes: &[u8]) -> Result<(), ValidationError> {
             }
         }
         _ => return Err(ValidationError::InvalidRef),
+    }
+    Ok(())
+}
+
+/// H6 of `komms-planning/AUDIT_2026-05-17.md`: reject any
+/// `role` byte that is not one of the values defined in
+/// `04_PERMISSIONS.md §3.5`. Acts on the parsed [`u8`] form
+/// AFTER the CBOR layer has decoded the uint, so it doesn't
+/// see the unclamped u64 — that's the parser's job.
+fn validate_role_byte(role: Option<u8>) -> Result<(), ValidationError> {
+    let Some(r) = role else { return Ok(()) };
+    if r > ROLE_MAX {
+        return Err(ValidationError::UnknownRole(r));
+    }
+    Ok(())
+}
+
+/// H6: a `target` byte string MUST be the canonical
+/// creator-address body — `version || payload`. The protocol
+/// does not pin the address version, so we accept any non-
+/// trivial length (1-byte version + ≥ 1-byte payload). The
+/// indexer is free to apply per-network shape checks on top
+/// (e.g. "33 bytes on Mainnet Schnorr"), but the protocol
+/// layer's job is only to refuse a definitionally-malformed
+/// grant.
+fn validate_target_bytes(target: Option<&[u8]>) -> Result<(), ValidationError> {
+    let Some(bytes) = target else { return Ok(()) };
+    if bytes.len() < 2 {
+        return Err(ValidationError::InvalidTargetLength(bytes.len()));
     }
     Ok(())
 }
@@ -926,8 +1032,32 @@ pub fn validate_event(ev: &ParsedKommsEvent) -> Result<(), ValidationError> {
                 return Err(ValidationError::InvalidEnc);
             }
         }
-        RoleAssign | RoleRevoke => {
+        RoleAssign => {
+            // H6 of `komms-planning/AUDIT_2026-05-17.md` +
+            // `komms-protocol/04_PERMISSIONS.md §3.5`:
+            //   ROLE_ASSIGN MUST carry { sid, target, role },
+            //   MAY carry cid (channel-scoped grant).
             require(has_sid, "sid|enc_sid")?;
+            require(ev.target.is_some(), "target")?;
+            require(ev.role.is_some(), "role")?;
+            validate_role_byte(ev.role)?;
+            validate_target_bytes(ev.target.as_deref())?;
+            if plaintext_enc_misuse {
+                return Err(ValidationError::InvalidEnc);
+            }
+        }
+        RoleRevoke => {
+            // ROLE_REVOKE MUST carry { sid, target }. `role` is
+            // OPTIONAL: omitting means "revoke every role this
+            // target currently holds in this scope" per
+            // `04_PERMISSIONS.md §3.5`. When present it MUST be
+            // a valid role enum value.
+            require(has_sid, "sid|enc_sid")?;
+            require(ev.target.is_some(), "target")?;
+            if ev.role.is_some() {
+                validate_role_byte(ev.role)?;
+            }
+            validate_target_bytes(ev.target.as_deref())?;
             if plaintext_enc_misuse {
                 return Err(ValidationError::InvalidEnc);
             }
@@ -1680,5 +1810,177 @@ mod tests {
         assert!(parsed.key_epoch.is_none());
         assert!(parsed.enc_sid.is_none());
         assert!(parsed.enc_t.is_none());
+    }
+
+    // ----- v1.2-pre role-management (H6 of
+    //       komms-planning/AUDIT_2026-05-17.md) -----
+
+    fn h6_target_bytes() -> Vec<u8> {
+        // 1-byte version (0 = PubKey) || 32-byte all-0x42
+        // Schnorr payload. Same shape the indexer reduces
+        // creator addresses to (`version || payload`).
+        let mut v = Vec::with_capacity(33);
+        v.push(0u8);
+        v.extend_from_slice(&[0x42u8; 32]);
+        v
+    }
+
+    /// H6 fixture: v1 ROLE_ASSIGN with `enc_scheme = 0`
+    /// (plaintext). All H6 tests start from this baseline; the
+    /// specific tests then mutate exactly one field.
+    fn h6_baseline_role_assign() -> ParsedKommsEvent {
+        ParsedKommsEvent {
+            v: 1,
+            t: EventType::RoleAssign,
+            sid: Some([0xAA; 32]),
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(1_700_000_020),
+            n: Some(21),
+            role: Some(ROLE_MODERATOR),
+            target: Some(h6_target_bytes()),
+            ..Default::default()
+        }
+    }
+
+    fn h6_baseline_role_revoke() -> ParsedKommsEvent {
+        ParsedKommsEvent {
+            v: 1,
+            t: EventType::RoleRevoke,
+            sid: Some([0xAA; 32]),
+            enc: false,
+            enc_scheme: Some(0),
+            ts: Some(1_700_000_022),
+            n: Some(23),
+            role: None,
+            target: Some(h6_target_bytes()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn h6_role_assign_round_trip_carries_target_and_role() {
+        let ev = h6_baseline_role_assign();
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed.role, Some(ROLE_MODERATOR));
+        assert_eq!(parsed.target.as_deref(), Some(h6_target_bytes().as_slice()));
+        assert_eq!(parsed.sid, Some([0xAA; 32]));
+    }
+
+    #[test]
+    fn h6_role_assign_missing_target_rejected_at_validate() {
+        let ev = ParsedKommsEvent {
+            target: None,
+            ..h6_baseline_role_assign()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::MissingForType(EventType::RoleAssign, "target")
+        );
+    }
+
+    #[test]
+    fn h6_role_assign_missing_role_rejected_at_validate() {
+        let ev = ParsedKommsEvent {
+            role: None,
+            ..h6_baseline_role_assign()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::MissingForType(EventType::RoleAssign, "role")
+        );
+    }
+
+    #[test]
+    fn h6_role_assign_out_of_range_role_rejected() {
+        let ev = ParsedKommsEvent {
+            role: Some(99),
+            ..h6_baseline_role_assign()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert_eq!(err, ValidationError::UnknownRole(99));
+    }
+
+    #[test]
+    fn h6_role_assign_short_target_rejected() {
+        let ev = ParsedKommsEvent {
+            // Single byte — only an address-version tag, no
+            // payload at all. Must be rejected.
+            target: Some(vec![0x00]),
+            ..h6_baseline_role_assign()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert_eq!(err, ValidationError::InvalidTargetLength(1));
+    }
+
+    #[test]
+    fn h6_role_revoke_accepts_omitted_role() {
+        // ROLE_REVOKE without a role enum means "revoke
+        // everything this target currently holds in this
+        // scope" per 04_PERMISSIONS.md §3.5.
+        let ev = h6_baseline_role_revoke();
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed.role, None);
+        assert_eq!(parsed.target.as_deref(), Some(h6_target_bytes().as_slice()));
+    }
+
+    #[test]
+    fn h6_role_revoke_requires_target() {
+        let ev = ParsedKommsEvent {
+            target: None,
+            ..h6_baseline_role_revoke()
+        };
+        let err = encode::encode_komms_payload(&ev).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::MissingForType(EventType::RoleRevoke, "target")
+        );
+    }
+
+    #[test]
+    fn h6_role_assign_channel_scoped_round_trip() {
+        // 04_PERMISSIONS.md §3.2 allows ROLE_ASSIGN to carry
+        // an optional `cid` for channel-scoped grants. We
+        // already require `sid`; `cid` MUST round-trip when
+        // present.
+        let ev = ParsedKommsEvent {
+            cid: Some([0xCC; 32]),
+            role: Some(ROLE_VIEWER),
+            ts: Some(1_700_000_021),
+            n: Some(22),
+            ..h6_baseline_role_assign()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert_eq!(parsed.cid, Some([0xCC; 32]));
+        assert_eq!(parsed.role, Some(ROLE_VIEWER));
+    }
+
+    #[test]
+    fn h6_key_31_and_32_no_longer_extension_fields() {
+        // Before H6, keys 31+32 were preserved as opaque
+        // extension_fields. After H6, they are core and must
+        // populate the structured fields. This protects
+        // against a regression that silently leaks role data
+        // into the extension bucket where downstream code
+        // would never see it.
+        let ev = ParsedKommsEvent {
+            role: Some(ROLE_ADMIN),
+            ..h6_baseline_role_assign()
+        };
+        let raw = encode::encode_komms_payload(&ev).unwrap();
+        let parsed = parse_komms_payload(&raw).unwrap();
+        assert!(
+            !parsed.extension_fields.contains_key(&31),
+            "key 31 (role) MUST surface as parsed.role, not extension_fields"
+        );
+        assert!(
+            !parsed.extension_fields.contains_key(&32),
+            "key 32 (target) MUST surface as parsed.target, not extension_fields"
+        );
     }
 }

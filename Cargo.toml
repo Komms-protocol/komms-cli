@@ -13,6 +13,14 @@ version = "0.1.0"
 edition = "2024"
 description = "Standalone developer CLI for KOMMS payloads (decode, post, read, inspect)"
 license = "Apache-2.0"
+# The cli depends on the in-tree `protocol/` workspace member via
+# a path-dep (ADR-016 §2). Publishing to crates.io would break the
+# resolve (crates.io disallows path-deps); the cli is shipped as a
+# downloadable binary, not a library, so opt out of `cargo publish`
+# explicitly. Required for `cargo deny check bans` to honour the
+# workspace's `allow-wildcard-paths = true` setting (the check
+# would otherwise reject the path-dep as a wildcard regression).
+publish = false
 
 [[bin]]
 name = "komms"

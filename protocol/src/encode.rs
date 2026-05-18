@@ -199,7 +199,19 @@ pub fn encode_cbor_map(ev: &ParsedKommsEvent) -> Result<Vec<u8>, ValidationError
         pairs.push((bk(30), Value::Bytes(sealed_signer.clone())));
     }
 
-    // Extension / vendor (keys 31..=255). BTreeMap iteration is already
+    // v1.2-pre role-management (keys 31..=32). H6 of
+    // `komms-planning/AUDIT_2026-05-17.md`. Emit in strict
+    // ascending key order so the canonical-bytes invariant
+    // (KOMMS_PRINCIPLES §6) holds across cross-language
+    // mirrors.
+    if let Some(role) = ev.role {
+        pairs.push((bk(31), Value::Integer((role as u64).into())));
+    }
+    if let Some(ref target) = ev.target {
+        pairs.push((bk(32), Value::Bytes(target.clone())));
+    }
+
+    // Extension / vendor (keys 33..=255). BTreeMap iteration is already
     // in ascending key order so we can append directly.
     for (key, val) in ev.extension_fields.iter() {
         pairs.push((bk(*key), val.clone()));

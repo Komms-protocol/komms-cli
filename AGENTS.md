@@ -41,8 +41,12 @@ in Horizon B, `komms-gateway` joins the consumer set per ADR-004.
 - **CLI**: `clap 4.5` (derive macros + env).
 - **Codec**: `ciborium` for CBOR; protocol crate owns canonical
   encoding.
-- **Crypto**: `ed25519-dalek`. **No hand-rolled crypto**
-  (KOMMS_PRINCIPLES §4).
+- **Crypto**: `ed25519-dalek`. Subject to the
+  [no-hand-rolled-crypto rule](../komms-planning/KOMMS_PRINCIPLES.md#4--no-hand-rolled-crypto)
+  (KOMMS_PRINCIPLES §4) — the single source of truth this stack row
+  recaps. L13 of
+  [`komms-planning/AUDIT_2026-05-17.md`](../komms-planning/AUDIT_2026-05-17.md)
+  closed.
 - **Hex**: `faster-hex`.
 - **Optional feature**: `submit` (gated behind a feature flag
   to keep the default CLI build offline-safe).

@@ -9,3 +9,13 @@ license = "Apache-2.0"
 ciborium = "0.2.2"
 sha2 = "0.10.8"
 thiserror = "2.0.12"
+# B2 of AUDIT_2026-05-17.md — protocol-level Ed25519 verification of
+# the canonical CBOR signing payload (`signing_payload_cbor`). Ed25519
+# is the canonical Komms identity signature scheme per ADR-013 +
+# KOMMS_PRINCIPLES §2 + komms-protocol/05_ENCRYPTION_POSTURE.md §"Wire
+# crypto stack". `ed25519-dalek 2.x` (the RustCrypto canonical impl)
+# is already present transitively via the workspace dep graph (e.g.
+# kaspa-wrpc-client); pinning it here lets the indexer + miner-submit
+# call `verify_event` without re-implementing the curve in two crates
+# (KOMMS_PRINCIPLES §4 — no hand-rolled crypto).
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "fast", "zeroize"] }
