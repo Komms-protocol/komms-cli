@@ -411,7 +411,7 @@ fn load_input_bytes(s: Option<&str>) -> anyhow::Result<Vec<u8>> {
         return hexutil::parse_hex_bytes(std::str::from_utf8(&buf).context("stdin utf-8")?.trim());
     }
     if let Some(path) = raw.strip_prefix('@') {
-        return Ok(std::fs::read(path).with_context(|| format!("read {path}"))?);
+        return std::fs::read(path).with_context(|| format!("read {path}"));
     }
     hexutil::parse_hex_bytes(raw)
 }
@@ -1034,30 +1034,30 @@ pub async fn run() -> anyhow::Result<()> {
                 let cid_f = cid_hex.as_deref().map(hexutil::parse_hex32).transpose()?;
                 let mut rows = Vec::new();
                 for (tx_id, rec) in entries {
-                    if let Some(t) = event_type {
-                        if rec.event_type != t {
-                            continue;
-                        }
+                    if let Some(t) = event_type
+                        && rec.event_type != t
+                    {
+                        continue;
                     }
-                    if let Some(s) = sid_f {
-                        if rec.sid != Some(s) {
-                            continue;
-                        }
+                    if let Some(s) = sid_f
+                        && rec.sid != Some(s)
+                    {
+                        continue;
                     }
-                    if let Some(c) = cid_f {
-                        if rec.cid != Some(c) {
-                            continue;
-                        }
+                    if let Some(c) = cid_f
+                        && rec.cid != Some(c)
+                    {
+                        continue;
                     }
-                    if let Some(lo) = daa_min {
-                        if rec.containing_daa < lo {
-                            continue;
-                        }
+                    if let Some(lo) = daa_min
+                        && rec.containing_daa < lo
+                    {
+                        continue;
                     }
-                    if let Some(hi) = daa_max {
-                        if rec.containing_daa > hi {
-                            continue;
-                        }
+                    if let Some(hi) = daa_max
+                        && rec.containing_daa > hi
+                    {
+                        continue;
                     }
                     rows.push(json!({
                         "txid": faster_hex::hex_string(&tx_id),

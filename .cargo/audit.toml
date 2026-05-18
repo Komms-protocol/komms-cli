@@ -1,0 +1,51 @@
+# `cargo audit` policy for komms-cli.
+#
+# This file mirrors the `[advisories] ignore = [...]` list in
+# `deny.toml`. Both tools are run independently in CI (the
+# `supply-chain` job in `.github/workflows/ci.yml`) and both must
+# agree on the set of accepted residual risks; otherwise CI flaps
+# between two different green-bars.
+#
+# Adding an advisory here without also adding it to `deny.toml`
+# (and vice-versa) is a code-review red flag. Each entry below
+# carries a one-line summary; the full risk-acceptance + tracking
+# rationale lives in `deny.toml`'s comments.
+#
+# Closes B8 of AUDIT_2026-05-17.md. Pattern mirrors
+# `komms-indexer/.cargo/audit.toml` and
+# `komms-gateway/.cargo/audit.toml`.
+
+[advisories]
+ignore = [
+    # `async-std` discontinued (transitive via workflow-core →
+    # kaspa-wrpc-client; the cli uses tokio).
+    "RUSTSEC-2025-0052",
+    # `atty` unmaintained (build-time via older clap chains in
+    # kaspa-* helpers).
+    "RUSTSEC-2024-0375",
+    # `instant` unmaintained (transitive via older parking_lot in
+    # the kaspa-* stack).
+    "RUSTSEC-2024-0384",
+    # `paste` no longer maintained (build-time proc-macro).
+    "RUSTSEC-2024-0436",
+    # `proc-macro-error` unmaintained (build-time only).
+    "RUSTSEC-2024-0370",
+    # `atty` Windows unaligned read — Linux + macOS deploy targets.
+    "RUSTSEC-2021-0145",
+    # `linkme` type-mismatch unsoundness — WASM-only path; the
+    # native cli binary never executes it.
+    "RUSTSEC-2024-0407",
+    # `rand` re-entrant custom-logger unsoundness — the cli uses
+    # the default tracing-subscriber logger which is not re-entrant.
+    "RUSTSEC-2026-0097",
+    # `atomic-polyfill` unmaintained — present in `Cargo.lock`
+    # via heapless 0.7 → postcard, but cfg-gated out of the
+    # production Linux + macOS dep graph (heapless conditionally
+    # pulls `atomic-polyfill` only for targets lacking native
+    # atomic ops). This is why `deny.toml`'s `[graph] targets`
+    # multi-platform pin marks RUSTSEC-2023-0089 as not-detected
+    # while `cargo audit` (which walks the entire lockfile,
+    # unfiltered) still fires. H32 of
+    # `komms-planning/AUDIT_2026-05-17.md`.
+    "RUSTSEC-2023-0089",
+]

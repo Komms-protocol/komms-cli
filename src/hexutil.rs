@@ -12,7 +12,7 @@ pub fn parse_hex32(s: &str) -> anyhow::Result<[u8; 32]> {
 
 pub fn parse_hex_bytes(s: &str) -> anyhow::Result<Vec<u8>> {
     let s = s.trim().strip_prefix("0x").unwrap_or(s.trim());
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         anyhow::bail!("hex length must be even");
     }
     let mut out = vec![0u8; s.len() / 2];

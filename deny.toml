@@ -1,0 +1,180 @@
+# cargo-deny configuration for komms-cli.
+#
+# Schema version 2 (see https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+# — `version` field deprecated; implicit v2 when the legacy
+# `vulnerability` / `notice` / `severity-threshold` keys are absent).
+#
+# Crates in scope: top-level `komms-cli` binary + `protocol`
+# path-dep sub-crate (the canonical KOMMS v0/v1.0/v1.1 wire format
+# vendored here pending ADR-004 consolidation in Horizon B).
+#
+# Mirrors `komms-indexer/deny.toml` (the canonical workspace
+# template) at every reachability rationale that applies to the
+# cli — both crates share the kaspa-wrpc-client dependency chain
+# and the protocol crate via path-dep, so the residual-risk
+# acceptance must match. Closes B8 of AUDIT_2026-05-17.md.
+
+[graph]
+all-features = true
+# Pin the dep-graph evaluation targets to the actual production
+# deployment surface (CLI is shipped as native binaries for
+# Linux + macOS operator workstations per `AGENTS.md`). Without
+# this, `cargo deny` defaults to the *host* target, which
+# silently diverges between developer macOS and the Linux CI
+# runner — H32 of `komms-planning/AUDIT_2026-05-17.md`. Listing
+# all production targets means: each advisory ignore must
+# resolve on at least one shipped target or `cargo deny` reports
+# it as `advisory-not-detected`.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+[output]
+feature-depth = 1
+
+# -------------------------------------------------------------------
+# Security advisories
+# -------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Soft-fail on yanked while the v1.1.0-rc.2 Kaspa patch line
+# churns; tighten to "deny" once Cargo.lock stops moving.
+yanked = "warn"
+# Each ignored advisory carries an explicit risk-acceptance note
+# + a tracking handle so a future audit can re-evaluate. Adding a
+# new entry without both fields is a code-review red flag.
+ignore = [
+    # RUSTSEC-2025-0052 — `async-std` has been discontinued. Pulled
+    # in transitively via `workflow-core` → kaspa-wrpc-client. Not
+    # reachable from any first-party `async-std::*` import; the cli
+    # uses tokio exclusively. Tracks the upstream `workflow-core`
+    # move off async-std (no ETA upstream).
+    "RUSTSEC-2025-0052",
+    # RUSTSEC-2024-0375 — `atty` unmaintained. Pulled in via older
+    # clap chains in kaspa-* helpers we don't link directly. Build-
+    # time only.
+    "RUSTSEC-2024-0375",
+    # RUSTSEC-2024-0384 — `instant` unmaintained. Pulled in via
+    # `parking_lot` (older versions) inside the kaspa-* stack.
+    # Transitive only; first-party code uses `std::time::Instant`.
+    "RUSTSEC-2024-0384",
+    # RUSTSEC-2024-0436 — `paste` no longer maintained. Build-time
+    # proc-macro used by older kaspa-* derive macros. No runtime
+    # exposure.
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2024-0370 — `proc-macro-error` unmaintained. Build-
+    # time only; replaced upstream in newer crates. No runtime
+    # exposure.
+    "RUSTSEC-2024-0370",
+    # H32 of `komms-planning/AUDIT_2026-05-17.md`. The following
+    # advisories were previously listed here but are *not*
+    # reachable on the pinned `[graph] targets` (Linux + macOS,
+    # x86_64 + aarch64); `cargo deny` reports them as
+    # `advisory-not-detected`. They remain in `.cargo/audit.toml`
+    # because `cargo audit` walks the entire `Cargo.lock`
+    # regardless of target and still requires the residual-risk
+    # acceptance:
+    #
+    #   - RUSTSEC-2021-0145 (`atty` Windows unaligned read)
+    #   - RUSTSEC-2023-0089 (`atomic-polyfill` unmaintained;
+    #     cfg-gated to no-atomics targets only)
+    #   - RUSTSEC-2024-0407 (`linkme` WASM-only unsoundness)
+    #   - RUSTSEC-2026-0097 (`rand` re-entrant logger)
+    #
+    # `cargo deny --log-level warn check advisories` will flag
+    # any new stale entry as `advisory-not-detected`.
+]
+
+# -------------------------------------------------------------------
+# Licenses
+# -------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "OpenSSL",
+    "MPL-2.0",
+    "CC0-1.0",
+    # 0BSD = BSD Zero-Clause License. Strictly more permissive than
+    # MIT (no attribution requirement). Pulled in transitively via
+    # the kaspa-* stack (`log4rs` → `kaspa-core`). Safe to allow
+    # alongside Apache-2.0. Mirrors `komms-indexer/deny.toml`.
+    "0BSD",
+    # CDLA-Permissive-2.0 = Community Data License Agreement (Linux
+    # Foundation). Reciprocity-free permissive licence used by the
+    # WebPKI root-store snapshot crate `webpki-roots`. Mirrors the
+    # allow-list precedent set in `komms-gateway/deny.toml` (WS-G.1).
+    "CDLA-Permissive-2.0",
+    # BSL-1.0 = Boost Software License 1.0. OSI-approved permissive
+    # licence comparable to MIT (no attribution requirement on
+    # binary distribution). Pulled in via `xxhash-rust` → `fjall`
+    # (the cli's keystore-state backend, same crate as the indexer).
+    # Safe to allow alongside Apache-2.0.
+    "BSL-1.0",
+]
+exceptions = [
+    # `malachite-base` + `malachite-nz` ship under LGPL-3.0-only and
+    # are pulled in transitively via `kaspa-math` →
+    # `kaspa-consensus-core` → every Kaspa-touching crate in this
+    # repo. Section 4 of the LGPL-3.0 explicitly permits use as a
+    # separable dependency by works under other licences, provided
+    # the LGPL'd source remains available (which it does, on
+    # crates.io). The Komms cli (Apache-2.0) therefore inherits the
+    # LGPL'd code without relicensing. Pinning the exception here
+    # documents the legal posture in-tree rather than burying it in
+    # CI scripts. Mirrors `komms-indexer/deny.toml`.
+    { allow = ["LGPL-3.0-only"], name = "malachite-base", version = "0.4.22" },
+    { allow = ["LGPL-3.0-only"], name = "malachite-nz", version = "0.4.22" },
+]
+
+# -------------------------------------------------------------------
+# Crate bans
+# -------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Canonical cargo-deny monorepo idiom: in-workspace path-deps
+# (`{ workspace = true }` + `{ path = "../foo" }`) have no version
+# constraint and would otherwise trip the `wildcards = "deny"`
+# guard. Setting this to `true` exempts only path/workspace deps;
+# external `crate = "*"` declarations are still rejected. See
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html#the-allow-wildcard-paths-field
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# -------------------------------------------------------------------
+# Source restrictions
+# -------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # Pinned-tag overrides for the Kaspa rusty-kaspa crates that
+    # ship the v1.1.0-rc.2 ABI we depend on (see
+    # `[patch.crates-io]` in this repo's `Cargo.toml`).
+    "https://github.com/kaspanet/rusty-kaspa.git",
+    # `fjall` patched to `improve-write-stalling` branch — same
+    # ABI as komms-indexer to keep state-backend behaviour
+    # consistent for `id new-wallet` keystore writes.
+    "https://github.com/fjall-rs/fjall.git",
+    # `serde_nested_with` 0.2.6 git pin (crates.io publish was
+    # yanked; tagged git source is identical SHA).
+    "https://github.com/murar8/serde_nested_with.git",
+]

@@ -1,0 +1,21 @@
+# CODEOWNERS — komms-cli
+#
+# Workspace contains the `protocol` crate — the single Rust
+# source of truth (ADR-016 §2 + WS-D.4, May 17 2026) that the
+# `komms-indexer` workspace (and every downstream Rust consumer
+# the protocol-crate gains in the future) takes as a
+# sibling-checkout path dependency. ADR-004 consolidates this
+# to a standalone crate in Horizon B; until then every
+# protocol-crate change is breaking for downstream consumers
+# and warrants explicit review.
+
+* @argonmining
+
+/protocol/              @argonmining
+/src/                   @argonmining
+
+# Build / CI / dependency policy.
+/.github/workflows/     @argonmining
+/Cargo.toml             @argonmining
+/Cargo.lock             @argonmining
+/deny.toml              @argonmining
