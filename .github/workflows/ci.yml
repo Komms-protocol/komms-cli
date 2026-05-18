@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt-clippy:
+    name: fmt + clippy (both crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: cli-fmt-clippy
+
+      - name: rustfmt --check (cli + protocol)
+        run: cargo fmt --all -- --check
+
+      - name: clippy (workspace, all targets, all features, locked)
+        # WS-D.4 / ADR-016 §2 promotes `protocol/` to a workspace member
+        # (see Cargo.toml [workspace]). `--workspace` is now load-bearing
+        # because `--all-targets` alone does not reach a non-member crate.
+        run: cargo clippy --workspace --all-targets --all-features --locked
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: cli-test
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        with:
+          tool: cargo-nextest
+
+      - name: cargo nextest run (workspace, locked)
+        # `protocol/tests/parity_fixtures.rs` is the ADR-016 canonical-
+        # bytes parity gate that anchors R-E8 cross-language drift.
+        # WS-D.4 made `protocol/` a workspace member explicitly so
+        # `--workspace` reaches it (previously the gate was silently
+        # skipped because cargo test cannot enter a non-member path-dep).
+        run: cargo nextest run --workspace --all-features --locked --no-tests=pass --no-fail-fast
+
+      - name: cargo test --doc (workspace, locked)
+        run: cargo test --doc --workspace --all-features --locked
+
+  supply-chain:
+    name: supply-chain (deny + audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install cargo-deny + cargo-audit
+        uses: taiki-e/install-action@94cb46f8d6e437890146ffbd78a778b78e623fb2 # v2.74.0
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo-deny (advisories, licenses, bans, sources)
+        run: cargo deny --all-features check
+
+      - name: cargo-audit (CVE scan vs Cargo.lock)
+        run: cargo audit --deny warnings
